@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  />
+  <title>Palliative Rounds — Patient Data Collector</title>
+
+  <!-- Icons (FIXED: removed bad integrity/crossorigin to avoid SRI block) -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    referrerpolicy="no-referrer"
+  />
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- Libraries (all optional / client-side only) -->
+  <!-- jsPDF for PDF export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js" defer></script>
+  <!-- PapaParse for CSV import/export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js" defer></script>
+  <!-- Tesseract for OCR (optional) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js" defer></script>
+</head>
+
+<body>
+  <!-- App Gradient Backdrop -->
+  <div class="app-bg"></div>
+
+  <!-- Top Bar -->
+  <header class="topbar glass">
+    <div class="brand">
+      <i class="fa-solid fa-heart-pulse"></i>
+      <span>Palliative Rounds</span>
+    </div>
+    <div class="top-actions">
+      <label class="import-btn" for="csvImport">
+        <i class="fa-solid fa-file-arrow-up"></i>
+        <span>Import CSV</span>
+      </label>
+      <input id="csvImport" type="file" accept=".csv" hidden />
+      <button id="ocrOpen" class="btn ghost">
+        <i class="fa-solid fa-camera"></i>
+        OCR Intake
+      </button>
+      <button id="exportCSV" class="btn ghost">
+        <i class="fa-solid fa-file-csv"></i>
+        Export CSV
+      </button>
+      <button id="exportPDF" class="btn primary">
+        <i class="fa-solid fa-file-pdf"></i>
+        Export PDF
+      </button>
+      <button id="openSettings" class="btn ghost" title="Preferences">
+        <i class="fa-solid fa-gear"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Tabs: Three Services/Sections (customizable) -->
+  <nav class="tabs glass" role="tablist" aria-label="Clinical Sections">
+    <button class="tab active" data-section="A" title="Double-click to rename"><i class="fa-solid fa-layer-group"></i> Section A</button>
+    <button class="tab" data-section="B" title="Double-click to rename"><i class="fa-solid fa-layer-group"></i> Section B</button>
+    <button class="tab" data-section="C" title="Double-click to rename"><i class="fa-solid fa-layer-group"></i> Section C</button>
+    <!-- New: Clear current section button -->
+    <button id="clearSectionBtn" class="btn tiny ghost" style="margin-left:auto" title="Clear all patients in the current section">
+      <i class="fa-solid fa-trash"></i> Clear Section
+    </button>
+  </nav>
+
+  <!-- Main Layout -->
+  <main class="layout">
+    <!-- Left: Patient List + Checklist -->
+    <aside class="pane pane-left glass">
+      <div class="pane-header">
+        <h2><i class="fa-solid fa-list-check"></i> Patient Roster</h2>
+        <button id="addQuickPatient" class="btn small">
+          <i class="fa-solid fa-user-plus"></i> Quick Add
+        </button>
+      </div>
+
+      <!-- Checklist Progress -->
+      <div class="progress-wrap">
+        <div class="progress-label">
+          <span>Round Progress</span>
+          <span id="progressPct">0%</span>
+        </div>
+        <div class="progress-bar"><div id="progressFill"></div></div>
+      </div>
+
+      <!-- Patient Search -->
+      <div class="search">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <input id="patientSearch" type="search" placeholder="Search patients..." />
+      </div>
+
+      <!-- Patient List -->
+      <ul id="patientList" class="patient-list" aria-live="polite">
+        <!-- Populated by JS -->
+      </ul>
+    </aside>
+
+    <!-- Center: Patient Snapshot & Data Entry -->
+    <section class="pane pane-center glass">
+      <div class="pane-header">
+        <h2>
+          <i class="fa-solid fa-user-doctor"></i>
+          <span id="currentPatientName">No patient selected</span>
+        </h2>
+        <div class="actions">
+          <button id="editPatientBtn" class="btn" disabled>
+            <i class="fa-solid fa-pen-to-square"></i>
+            Update Status
+          </button>
+          <button id="markDoneBtn" class="btn ghost" disabled>
+            <i class="fa-solid fa-check"></i> Mark as Done
+          </button>
+          <button id="reminderBtn" class="btn ghost" disabled>
+            <i class="fa-regular fa-bell"></i> Add Reminder
+          </button>
+        </div>
+      </div>
+
+      <!-- Biographical Data (exact hospital headers) -->
+      <div class="cards-grid">
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-id-card-clip"></i>
+            Biographical Data
+          </div>
+          <div class="keyvals">
+            <div class="kv"><span>Patient Code</span><strong id="bioCode">—</strong></div>
+            <div class="kv"><span>Patient Name</span><strong id="bioName">—</strong></div>
+            <div class="kv"><span>Patient Age</span><strong id="bioAge">—</strong></div>
+            <div class="kv"><span>Room</span><strong id="bioRoom">—</strong></div>
+            <div class="kv"><span>Admitting Provider</span><strong id="bioProvider">—</strong></div>
+            <div class="kv"><span>Cause Of Admission</span><strong id="bioCOA">—</strong></div>
+            <div class="kv"><span>Diet</span><strong id="bioDiet">—</strong></div>
+            <div class="kv"><span>Isolation</span><strong id="bioIso">—</strong></div>
+            <div class="kv"><span>Comments</span><strong id="bioComments">—</strong></div>
+          </div>
+        </article>
+
+        <!-- HPI -->
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-notes-medical"></i>
+            HPI
+          </div>
+          <div class="stack">
+            <div class="hpi-item"><span>Cause of Admission</span><p id="hpiCause">—</p></div>
+            <div class="hpi-item"><span>Previous Treatment</span><p id="hpiPrevTx">—</p></div>
+            <div class="hpi-item"><span>Current Treatment</span><p id="hpiCurrTx">—</p></div>
+            <div class="hpi-item"><span>Initial Assessment</span><p id="hpiInit">—</p></div>
+          </div>
+        </article>
+
+        <!-- ESAS -->
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-table-list"></i>
+            ESAS (1–10)
+          </div>
+          <div id="esasSummary" class="esas-summary">
+            <!-- Populated with full ESAS set as chips -->
+          </div>
+        </article>
+
+        <!-- CTCAE (optional toggle) -->
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            CTCAE (selected items)
+            <div class="spacer"></div>
+            <label class="switch">
+              <input id="toggleCTCAE" type="checkbox" />
+              <span class="slider"></span><span class="lbl">Enable</span>
+            </label>
+          </div>
+
+          <div id="ctcaeSummary" class="ctcae-summary is-disabled">
+            <p class="muted">
+              CTCAE is currently disabled. Toggle "Enable" to record grades.
+            </p>
+          </div>
+
+          <!-- Collapsible inline guide (hidden to save space) -->
+          <details class="inline-guide">
+            <summary>
+              <i class="fa-regular fa-circle-question"></i>
+              CTCAE grading quick guide
+            </summary>
+            <div class="guide-body">
+              <p>
+                CTCAE grades adverse events on a 1–5 scale (1=mild, 2=moderate, 3=severe, 4=life-threatening, 5=death).
+                For official definitions, refer to the Common Terminology Criteria for Adverse Events (CTCAE v5.0) by NCI.
+              </p>
+              <p class="muted">
+                This is a compact summary for quick reference. Consult the official NCI CTCAE v5.0 document for full details.
+              </p>
+              <a class="link" href="https://ctep.cancer.gov/protocoldevelopment/electronic_applications/ctc.htm" target="_blank" rel="noopener">
+                Open official NCI CTCAE page
+              </a>
+            </div>
+          </details>
+        </article>
+
+        <!-- Labs grouped into 3 groups -->
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-flask-vial"></i>
+            Labs — Group 1
+          </div>
+          <div class="keyvals compact" id="labsGroup1">
+            <!-- WBC, HGB, PLT, ANC, CRP (+trend), Albumin -->
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-flask"></i>
+            Labs — Group 2
+          </div>
+          <div class="keyvals compact" id="labsGroup2">
+            <!-- Na, K, Cl, Ca, Ph, ALP -->
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-solid fa-vial"></i>
+            Labs — Group 3
+          </div>
+          <div class="keyvals compact" id="labsGroup3">
+            <!-- SCR, BUN, Total Bile, Other -->
+          </div>
+        </article>
+
+        <!-- Side notes -->
+        <article class="card">
+          <div class="card-title">
+            <i class="fa-regular fa-clipboard"></i>
+            Latest Notes
+          </div>
+          <div class="notes-box" id="latestNotes">No notes yet.</div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Right: Quick Entry & Report -->
+    <aside class="pane pane-right glass">
+      <div class="pane-header">
+        <h2><i class="fa-solid fa-wand-magic-sparkles"></i> Quick Actions</h2>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><i class="fa-regular fa-file-lines"></i> Generate Report</div>
+        <div class="stack">
+          <label class="checkbox">
+            <input type="checkbox" id="includeBiographical" checked />
+            <span>Include Biographical Data</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="includeHPI" checked />
+            <span>Include HPI</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="includeESAS" checked />
+            <span>Include ESAS</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="includeCTCAE" />
+            <span>Include CTCAE</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="includeLabs" checked />
+            <span>Include Labs</span>
+          </label>
+          <button id="generateReport" class="btn primary">
+            <i class="fa-solid fa-file-export"></i> Generate
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><i class="fa-regular fa-bell"></i> Reminders</div>
+        <div id="remindersList" class="reminders-list">
+          <!-- Populated by JS -->
+        </div>
+        <button id="addReminderQuick" class="btn ghost small">
+          <i class="fa-solid fa-plus"></i> New Reminder
+        </button>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ============ MODALS ============ -->
+
+  <!-- Quick Add Patient Modal -->
+  <dialog id="modalQuickPatient" class="modal">
+    <form method="dialog" class="modal-body">
+      <header class="modal-header">
+        <h3><i class="fa-solid fa-user-plus"></i> Quick Add Patient</h3>
+        <button class="icon-btn close" value="cancel" aria-label="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </header>
+
+      <div class="grid-2">
+        <div class="field">
+          <label>Patient Code</label>
+          <input id="qpCode" type="text" placeholder="e.g., P-00123" required />
+        </div>
+        <div class="field">
+          <label>Patient Name</label>
+          <input id="qpName" type="text" placeholder="Full name" required />
+        </div>
+        <div class="field">
+          <label>Patient Age</label>
+          <input id="qpAge" type="number" min="0" placeholder="e.g., 64" required />
+        </div>
+        <div class="field">
+          <label>Room</label>
+          <input id="qpRoom" type="text" placeholder="e.g., 12B" />
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label>Admitting Provider</label>
+          <input id="qpProvider" type="text" placeholder="e.g., Dr. Smith" />
+        </div>
+        <div class="field">
+          <label>Cause Of Admission</label>
+          <input id="qpCOA" type="text" placeholder="e.g., SOB, infection..." />
+        </div>
+        <div class="field">
+          <label>Diet</label>
+          <input id="qpDiet" type="text" placeholder="e.g., NPO / Regular" />
+        </div>
+        <div class="field">
+          <label>Isolation</label>
+          <input id="qpIso" type="text" placeholder="e.g., Contact / None" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Comments</label>
+        <textarea id="qpComments" rows="2" placeholder="Any notes..."></textarea>
+      </div>
+
+      <footer class="modal-footer">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button id="qpSave" class="btn primary" value="default">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Update Status Modal (ALL required fields here) -->
+  <dialog id="modalUpdate" class="modal wide">
+    <form method="dialog" class="modal-body">
+      <header class="modal-header">
+        <h3><i class="fa-solid fa-pen-to-square"></i> Update Patient Status</h3>
+        <button class="icon-btn close" value="cancel" aria-label="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </header>
+
+      <!-- HPI -->
+      <section class="section">
+        <h4>HPI</h4>
+        <div class="grid-2">
+          <div class="field">
+            <label>Cause of Admission</label>
+            <textarea id="hpiCauseInput" rows="2" placeholder="Reason for admission..."></textarea>
+          </div>
+          <div class="field">
+            <label>Previous Treatment</label>
+            <textarea id="hpiPrevTxInput" rows="2" placeholder="Chemo / RT / Surgery / Other..."></textarea>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label>Current Treatment</label>
+            <textarea id="hpiCurrTxInput" rows="2" placeholder="Current meds / interventions..."></textarea>
+          </div>
+          <div class="field">
+            <label>Initial Assessment</label>
+            <textarea id="hpiInitInput" rows="2" placeholder="Initial findings..."></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- ESAS (1-10 radio grid) -->
+      <section class="section">
+        <div class="section-head">
+          <h4>ESAS (choose 1–10)</h4>
+          <button type="button" class="btn tiny ghost" id="esasClearBtn">
+            <i class="fa-solid fa-eraser"></i> Clear
+          </button>
+        </div>
+        <div id="esasInputs" class="esas-grid">
+          <!-- Full ESAS set populated by JS as radio button groups 1–10 -->
+        </div>
+      </section>
+
+      <!-- CTCAE toggle + the 8 requested items -->
+      <section class="section">
+        <div class="section-head">
+          <h4>CTCAE (optional)</h4>
+          <label class="switch">
+            <input id="ctcaeEnableInput" type="checkbox" />
+            <span class="slider"></span><span class="lbl">Enable</span>
+          </label>
+        </div>
+
+        <div id="ctcaeInputs" class="ctcae-grid disabled">
+          <!-- 8 items (radio for Grade 0–4/5). Populated by JS when enabled -->
+        </div>
+      </section>
+
+      <!-- Labs (three groups) + reference tooltips + defaults -->
+      <section class="section">
+        <div class="section-head"><h4>Labs</h4></div>
+        <div class="grid-3">
+          <div class="fieldset">
+            <div class="legend">Group 1</div>
+            <div class="grid-2 tight" id="labsInputs1"></div>
+          </div>
+          <div class="fieldset">
+            <div class="legend">Group 2</div>
+            <div class="grid-2 tight" id="labsInputs2"></div>
+          </div>
+          <div class="fieldset">
+            <div class="legend">Group 3</div>
+            <div class="grid-2 tight" id="labsInputs3"></div>
+          </div>
+        </div>
+        <div class="field">
+          <label>CRP Trend</label>
+          <input id="labCRPTrend" type="text" placeholder="e.g., 32→28→20 mg/L" />
+        </div>
+        <div class="field">
+          <label>Other (name=value; comma separated)</label>
+          <textarea id="labOther" rows="2" placeholder="LDH=280; INR=1.1; AST=42"></textarea>
+        </div>
+      </section>
+
+      <!-- Assessment & Medications -->
+      <section class="section">
+        <div class="grid-2">
+          <div class="field">
+            <label>Patient Assessment</label>
+            <textarea id="patientAssessment" rows="3" placeholder="Brief clinical assessment..."></textarea>
+          </div>
+          <div class="field">
+            <label>List of Medication</label>
+            <textarea id="medicationList" rows="3" placeholder="Medication list (name, dose, frequency)..."></textarea>
+          </div>
+        </div>
+      </section>
+
+      <footer class="modal-footer">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button id="updateSaveBtn" class="btn primary" value="default">
+          <i class="fa-solid fa-floppy-disk"></i> Save
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- OCR Modal -->
+  <dialog id="modalOCR" class="modal">
+    <form method="dialog" class="modal-body">
+      <header class="modal-header">
+        <h3><i class="fa-solid fa-camera"></i> OCR Intake (optional)</h3>
+        <button class="icon-btn close" value="cancel" aria-label="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </header>
+
+      <p class="muted">
+        Take a photo of the daily sheet to auto-capture: Patient Name, Patient Age, Cause Of Admission (where available).
+      </p>
+
+      <div class="ocr-uploader">
+        <input id="ocrFile" type="file" accept="image/*" capture="environment" />
+        <button id="runOCR" type="button" class="btn">
+          <i class="fa-solid fa-wand-magic-sparkles"></i> Run OCR
+        </button>
+      </div>
+
+      <pre id="ocrOutput" class="pre muted"></pre>
+
+      <footer class="modal-footer">
+        <button class="btn ghost" value="cancel">Close</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Settings (contrast / theme) -->
+  <dialog id="modalSettings" class="modal">
+    <form method="dialog" class="modal-body">
+      <header class="modal-header">
+        <h3><i class="fa-solid fa-gear"></i> Preferences</h3>
+        <button class="icon-btn close" value="cancel" aria-label="Close">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </header>
+
+      <div class="grid-2">
+        <div class="field">
+          <label>Theme</label>
+          <select id="themeSelect">
+            <option value="auto">Auto</option>
+            <option value="light">Light (high contrast)</option>
+            <option value="dark">Dark (high contrast)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Font Size</label>
+          <select id="fontSizeSelect">
+            <option value="base">Base</option>
+            <option value="lg">Large</option>
+            <option value="xl">Extra Large</option>
+          </select>
+        </div>
+      </div>
+
+      <footer class="modal-footer">
+        <button class="btn ghost" value="cancel">Close</button>
+        <button id="saveSettings" class="btn primary" value="default">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <!-- Toasts -->
+  <div id="toasts" class="toasts"></div>
+
+  <!-- Scripts: split by responsibility -->
+  <script src="js/utils.js" defer></script>
+  <script src="js/state.js" defer></script>
+  <script src="js/ui.js" defer></script>
+  <script src="js/import_export.js" defer></script>
+  <script src="js/esas.js" defer></script>
+  <script src="js/ctcae.js" defer></script>
+  <script src="js/labs.js" defer></script>
+  <script src="js/reports.js" defer></script>
+  <script src="js/reminders.js" defer></script>
+  <script src="js/ocr.js" defer></script>
+  <script src="js/app.js" defer></script>
+  <script src="js/sync.js" defer></script>
+</body>
+</html>
