@@ -1,6 +1,6 @@
-// cloud_sync.js — Google Drive appDataFolder sync using Google Identity Services (GIS) + visual toast
+// cloud_sync.js — GIS Drive sync + visible debug copy in My Drive
 (function () {
-  const SCOPES = "https://www.googleapis.com/auth/drive.appdata";
+  const SCOPES = "https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
   const CLIENT_ID = "308165100455-rvdphpnblnc7b3v9nscfht5ve6jplape.apps.googleusercontent.com";
   const API_KEY = "AIzaSyDId_gso-NTeIN-ZqCI6CB7EUv7p3Pv4LM";
 
@@ -90,15 +90,16 @@
     if (!ready || !fileId || saving) return;
     try {
       saving = true;
+      const bodyStr = JSON.stringify(stateObj || {}, null, 2);
       await gapi.client.request({
         path: "/upload/drive/v3/files/" + fileId,
         method: "PATCH",
         params: { uploadType: "media" },
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(stateObj || {}, null, 2)
+        body: bodyStr
       });
-      // 👇 هنا يطلع إشعار كل مرة ينجح الحفظ
       PR.utils?.toast?.("Cloud sync saved ✓", "success");
+      await saveDebugCopy(bodyStr);
     } finally {
       saving = false;
     }
@@ -108,6 +109,57 @@
     if (!ready || !fileId) return null;
     const res = await gapi.client.drive.files.get({ fileId, alt: "media" });
     return res.result;
+  }
+
+  // === Visible debug copy in My Drive: /PalliativeRounds/state_debug.json ===
+  async function ensureDebugFolder() {
+    const res = await gapi.client.drive.files.list({
+      q: "name='PalliativeRounds' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'root' in parents",
+      fields: "files(id,name)",
+      spaces: "drive"
+    });
+    if (res.result.files?.length) return res.result.files[0].id;
+    const meta = { name: "PalliativeRounds", mimeType: "application/vnd.google-apps.folder", parents: ["root"] };
+    const created = await gapi.client.drive.files.create({ resource: meta, fields: "id" });
+    return created.result.id;
+  }
+
+  async function saveDebugCopy(bodyStr) {
+    try {
+      const folderId = await ensureDebugFolder();
+      const res = await gapi.client.drive.files.list({
+        q: `name='state_debug.json' and trashed=false and '${folderId}' in parents`,
+        fields: "files(id,name)",
+        spaces: "drive"
+      });
+      if (res.result.files?.length) {
+        const fid = res.result.files[0].id;
+        await gapi.client.request({
+          path: "/upload/drive/v3/files/" + fid,
+          method: "PATCH",
+          params: { uploadType: "media" },
+          headers: { "Content-Type": "application/json" },
+          body: bodyStr
+        });
+      } else {
+        const boundary = "-------314159265358979323846";
+        const delimiter = "\r\n--" + boundary + "\r\n";
+        const closeDelim = "\r\n--" + boundary + "--";
+        const meta = JSON.stringify({ name: "state_debug.json", parents: [folderId] });
+        const body = delimiter +
+          'Content-Type: application/json; charset=UTF-8\r\n\r\n' + meta +
+          delimiter + 'Content-Type: application/json\r\n\r\n' + bodyStr + closeDelim;
+        await gapi.client.request({
+          path: "/upload/drive/v3/files",
+          method: "POST",
+          params: { uploadType: "multipart" },
+          headers: { "Content-Type": 'multipart/related; boundary="' + boundary + '"' },
+          body
+        });
+      }
+    } catch (e) {
+      console.warn("Debug copy save failed", e);
+    }
   }
 
   window.PR = window.PR || {};
