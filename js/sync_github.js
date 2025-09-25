@@ -3,7 +3,8 @@
    Zero-server sync using GitHub Contents API
    - Load once on open from data/patients.json
    - Debounced bulk saves (PUT) with conflict resolution
-   - No polling, no change-log; last-writer-wins by updatedAt
+   - Auto-refresh every minute when remote changes (by SHA)
+   - No polling change-log; last-writer-wins by updatedAt
    - Wraps PR.state only (no core logic changes)
 -------------------------------------------------------*/
 
@@ -19,7 +20,7 @@
     ghPath:  "gh_path",   // e.g., data/patients.json
     ghBranch:"gh_branch", // e.g., main
     inited:  "gh_inited",
-    sha:     "gh_last_sha", // last known blob SHA for PUT
+    sha:     "gh_last_sha", // last known blob SHA for PUT / auto-refresh
   };
 
   // Save debounce (good for CSV import & batched edits)
@@ -28,10 +29,18 @@
     MAX_QUEUE:  200,
   };
 
+  // Auto-refresh settings (pull latest if SHA changed)
+  const REFRESH = {
+    ENABLED: true,
+    INTERVAL_MS: 60_000, // 1 minute
+  };
+
   /* ---------------- Local State ---------------- */
   let APPLYING_REMOTE = false;
   let saveTimer = null;
   let pendingCount = 0;
+  let refreshTimer = null;
+  let lastAutoRefreshAt = 0;
 
   /* ---------------- Storage helpers ---------------- */
   const get = (k, d) => U.load(k, d);
@@ -82,7 +91,7 @@
       const t = await safeText(res);
       throw new Error(`GET ${res.status} ${res.statusText} ${t && "– "+t}`);
     }
-    return res.json();
+    return res.json(); // {content, encoding, sha, ...}
   }
 
   async function ghPutContents({ contentB64, message, sha }) {
@@ -107,7 +116,7 @@
       err.status = res.status;
       throw err;
     }
-    return res.json();
+    return res.json(); // {content:{sha,...}, commit:{...}}
   }
 
   async function safeText(res) {
@@ -117,9 +126,7 @@
 
   /* ---------------- JSON <-> Base64 helpers (UTF-8 safe) ---------------- */
   function toB64Utf8(str) {
-    // Encode UTF-8 then Base64
     const bytes = new TextEncoder().encode(str);
-    // Convert bytes to binary string for btoa
     let bin = "";
     for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
     return btoa(bin);
@@ -149,7 +156,6 @@
       if (!l || !l.id) return;
       const r = byId.get(l.id);
       if (!r) { byId.set(l.id, ensurePatientShape(l)); return; }
-      // prefer the newer updatedAt (ISO string)
       const rt = Date.parse(r.updatedAt || 0) || 0;
       const lt = Date.parse(l.updatedAt || 0) || 0;
       byId.set(l.id, ensurePatientShape(lt >= rt ? l : r));
@@ -178,7 +184,6 @@
       setInited(true);
       U.toast("Loaded from GitHub.", "success");
     } catch (e) {
-      // If file not found (404), OK — we will create it on first save.
       if (String(e.message || e).includes("404")) {
         setSha("");
         setInited(true);
@@ -239,11 +244,56 @@
 
       // Success
       const newSha = (res && res.content && res.content.sha) || "";
-      setSha(newSha);
-      // U.toast("Saved to GitHub.", "success");
+      if (newSha) setSha(newSha);
+      // Minimal toast to avoid spam
     } catch (e) {
       console.error("GitHub save failed:", e);
       U.toast(`GitHub save failed: ${e.message || e}`, "warn");
+    }
+  }
+
+  /* ---------------- Auto-refresh (pull when remote SHA changes) ---------------- */
+  function startAutoRefresh() {
+    if (!REFRESH.ENABLED) return;
+    if (refreshTimer) return;
+    // kick off after short delay to avoid racing with initial load
+    refreshTimer = setInterval(checkRemoteAndApplyIfChanged, REFRESH.INTERVAL_MS);
+    // optional: first check after 10s
+    setTimeout(checkRemoteAndApplyIfChanged, 10_000);
+  }
+
+  async function checkRemoteAndApplyIfChanged() {
+    if (!isConfigured()) return;
+    // Avoid pull while we're applying/saving locally
+    if (APPLYING_REMOTE || pendingCount > 0 || saveTimer) return;
+    const now = Date.now();
+    if (now - lastAutoRefreshAt < 5_000) return; // guard
+    lastAutoRefreshAt = now;
+
+    try {
+      const meta = await ghGetContents(); // lightweight enough, returns sha + content
+      const remoteSha = meta.sha || "";
+      if (!remoteSha) return;
+
+      // If SHA changed, apply remote snapshot
+      if (remoteSha !== getSha()) {
+        const json = fromB64Utf8(meta.content || "");
+        const parsed = JSON.parse(json || "[]");
+        APPLYING_REMOTE = true;
+
+        const ids = S.state.patients.map(p => p.id);
+        ids.forEach(id => S.removePatient(id));
+        (Array.isArray(parsed) ? parsed : (parsed.patients || [])).forEach(p => {
+          S.addPatient(ensurePatientShape(p));
+        });
+
+        setSha(remoteSha);
+        APPLYING_REMOTE = false;
+        U.toast("Auto-refreshed from GitHub.", "success");
+      }
+    } catch (e) {
+      // Silent on auto-check to avoid spam; log only
+      console.debug("Auto-refresh check failed:", e && e.message ? e.message : e);
     }
   }
 
@@ -306,9 +356,6 @@
           <label>Branch</label>
           <input id="ghBranch" type="text" placeholder="main" />
         </div>
-        <div class="field" style="grid-column: 1 / -1">
-          <small class="muted">Your token stays in this browser (localStorage). Keep it private.</small>
-        </div>
       `;
       body.insertBefore(wrap, footer);
     }
@@ -340,6 +387,7 @@
       if (isConfigured()) {
         U.toast("GitHub config saved.", "success");
         if (!isInited()) await loadOnce();
+        startAutoRefresh(); // ensure auto-refresh running after config
       } else {
         U.toast("GitHub config incomplete.", "warn");
       }
@@ -351,15 +399,28 @@
     wrapState();
     hookSettingsUI();
 
-    if (isConfigured() && !isInited()) {
-      loadOnce();
+    if (isConfigured()) {
+      if (!isInited()) {
+        loadOnce().then(() => startAutoRefresh());
+      } else {
+        startAutoRefresh();
+      }
     }
   });
 
-  /* ---------------- Public API (optional) ---------------- */
+  /* ---------------- Public API ---------------- */
   PR.sync = {
     loadOnce,
     saveNow,
     getConfig: cfg,
+    // optional controls:
+    enableAutoRefresh(ms) {
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+      if (ms && typeof ms === "number") REFRESH.INTERVAL_MS = ms;
+      startAutoRefresh();
+    },
+    disableAutoRefresh() {
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    },
   };
 })();
