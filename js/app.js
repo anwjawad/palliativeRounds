@@ -29,6 +29,21 @@
   function init() {
     // Restore persisted state (seeds demo data if empty)
     S.restore();
+    // Try cloud load if ready
+    (async () => {
+      try {
+        if (PR.cloud?.ready) {
+          const cloud = await PR.cloud.loadAll();
+          if (cloud && typeof cloud === "object") {
+            PR.state.state = cloud;
+            PR.state.persist();
+            PR.ui?.renderAll?.();
+            PR.utils?.toast?.("Cloud state synced.", "success");
+          }
+        }
+      } catch {}
+    })();
+
 
     // Save/close behavior for Update modal (collect HPI + assessment/meds)
     els.updateSaveBtn?.addEventListener("click", (e) => {
