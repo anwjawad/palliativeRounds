@@ -345,9 +345,9 @@
         save(K.settings, state.settings);
         save(K.ui, state.ui);
     }
-  
   try { PR.cloud?.ready && PR.cloud.saveAll(state); } catch {}
-};
+
+  };
 
   const restore = () => {
     state.patients = (load(K.patients, []) || []).map(ensureSchema);
