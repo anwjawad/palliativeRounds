@@ -1,4 +1,4 @@
-// cloud_sync.js — Google Drive appDataFolder sync using Google Identity Services (GIS)
+// cloud_sync.js — Google Drive appDataFolder sync using Google Identity Services (GIS) + visual toast
 (function () {
   const SCOPES = "https://www.googleapis.com/auth/drive.appdata";
   const CLIENT_ID = "308165100455-rvdphpnblnc7b3v9nscfht5ve6jplape.apps.googleusercontent.com";
@@ -9,14 +9,12 @@
   const FILE_NAME = "palliative_rounds_state.json";
 
   async function init() {
-    // Load gapi client (no auth2 here)
     await new Promise(r => gapi.load("client", r));
     await gapi.client.init({
       apiKey: API_KEY,
       discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"]
     });
 
-    // Prepare GIS token client
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: CLIENT_ID,
       scope: SCOPES,
@@ -31,7 +29,6 @@
     });
 
     document.getElementById("enableCloud")?.addEventListener("click", () => {
-      // Request consent (first time shows prompt, subsequent can be silent)
       tokenClient.requestAccessToken({ prompt: "consent" });
     });
   }
@@ -45,7 +42,7 @@
         PR.state.state = cloud;
         PR.state.persist();
         PR.ui?.renderAll?.();
-        PR.utils?.toast?.("Cloud state synced.", "success");
+        PR.utils?.toast?.("Cloud state synced from Drive.", "success");
       }
     } catch (e) {
       console.warn("Initial cloud load failed", e);
@@ -100,6 +97,8 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(stateObj || {}, null, 2)
       });
+      // 👇 هنا يطلع إشعار كل مرة ينجح الحفظ
+      PR.utils?.toast?.("Cloud sync saved ✓", "success");
     } finally {
       saving = false;
     }
