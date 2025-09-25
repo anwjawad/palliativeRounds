@@ -29,6 +29,7 @@
   function init() {
     // Restore persisted state (seeds demo data if empty)
     S.restore();
+
     // Try cloud load if ready
     (async () => {
       try {
