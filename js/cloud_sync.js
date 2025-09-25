@@ -1,4 +1,4 @@
-// cloud_sync.js — GIS Drive sync + visible debug copy in My Drive
+// cloud_sync.debug.js — GIS Drive sync + visible debug copy in My Drive
 (function () {
   const SCOPES = "https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
   const CLIENT_ID = "308165100455-rvdphpnblnc7b3v9nscfht5ve6jplape.apps.googleusercontent.com";
@@ -111,7 +111,6 @@
     return res.result;
   }
 
-  // === Visible debug copy in My Drive: /PalliativeRounds/state_debug.json ===
   async function ensureDebugFolder() {
     const res = await gapi.client.drive.files.list({
       q: "name='PalliativeRounds' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'root' in parents",
