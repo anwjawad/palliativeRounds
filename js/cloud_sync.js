@@ -1,42 +1,42 @@
-// cloud_sync.js — Google Drive appDataFolder sync (client-only)
+// cloud_sync.js — Google Drive appDataFolder sync using Google Identity Services (GIS)
 (function () {
   const SCOPES = "https://www.googleapis.com/auth/drive.appdata";
   const CLIENT_ID = "308165100455-rvdphpnblnc7b3v9nscfht5ve6jplape.apps.googleusercontent.com";
   const API_KEY = "AIzaSyDId_gso-NTeIN-ZqCI6CB7EUv7p3Pv4LM";
 
   let ready = false, fileId = null, saving = false;
+  let tokenClient = null;
   const FILE_NAME = "palliative_rounds_state.json";
 
   async function init() {
-    await new Promise(r => gapi.load("client:auth2", r));
+    // Load gapi client (no auth2 here)
+    await new Promise(r => gapi.load("client", r));
     await gapi.client.init({
       apiKey: API_KEY,
-      clientId: CLIENT_ID,
-      scope: SCOPES,
       discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"]
     });
 
-    document.getElementById("enableCloud")?.addEventListener("click", enableSync);
-
-    const auth = gapi.auth2.getAuthInstance();
-    if (auth.isSignedIn.get()) {
-      ready = true;
-      await ensureFile();
-      try {
-        const cloud = await loadAll();
-        if (cloud && typeof cloud === "object") {
-          PR.state.state = cloud;
-          PR.state.persist();
-          PR.ui?.renderAll?.();
-          PR.utils?.toast?.("Cloud state loaded.", "success");
+    // Prepare GIS token client
+    tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: CLIENT_ID,
+      scope: SCOPES,
+      callback: (resp) => {
+        if (resp && resp.access_token) {
+          gapi.client.setToken({ access_token: resp.access_token });
+          afterAuthorized().catch(console.error);
+        } else {
+          console.warn("No access token returned", resp);
         }
-      } catch {}
-    }
+      }
+    });
+
+    document.getElementById("enableCloud")?.addEventListener("click", () => {
+      // Request consent (first time shows prompt, subsequent can be silent)
+      tokenClient.requestAccessToken({ prompt: "consent" });
+    });
   }
 
-  async function enableSync() {
-    const auth = gapi.auth2.getAuthInstance();
-    if (!auth.isSignedIn.get()) await auth.signIn();
+  async function afterAuthorized() {
     ready = true;
     await ensureFile();
     try {
