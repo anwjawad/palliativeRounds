@@ -1,10 +1,10 @@
 /**
- * sheets_api.js (improved)
+ * sheets_api.js (with CORS-safe auto-fallback)
  * واجهة التعامل مع Google Apps Script WebApp (PalliativeRoundsDB)
  *
- * يدعم:
- *   - fetch (للـ http/https)
- *   - JSONP (للـ file://)
+ * يعمل على:
+ *   - GitHub Pages / أي أصل https: يحاول fetch أولاً، وإن فشل (CORS) يسقط على JSONP تلقائياً.
+ *   - file:// : يستعمل JSONP مباشرة.
  *
  * دوال:
  *   PatientsAPI.list/save/remove
@@ -15,14 +15,17 @@
  *   MetadataAPI.get/save
  */
 
-// ==================== إعداد ====================
-// ضع هنا رابط الـ Web App من GAS (ينتهي بـ /exec)
+/* ==================== إعداد ==================== */
+// ضع هنا رابط الـ Web App من GAS (الذي ينتهي بـ /exec)
 const WEBAPP_URL = "https://script.google.com/macros/s/AKfycbz_ja78AXDQSiZeOKLmadElea7osfo2-3E-F8_lJfwMcmzY2jTuFV-rYNauVlBa9v1uww/exec";
 
-// هل الصفحة شغالة من file:// ؟
+// إجبار JSONP (مفيد على GitHub Pages لتجنب CORS نهائياً)
+const FORCE_JSONP = true;
+
+// هل الصفحة تعمل من file:// ؟
 const IS_FILE_PROTOCOL = typeof location !== "undefined" && location.protocol === "file:";
 
-// تحقق مبكر من صحة الرابط
+/* تحقق مبكر من صحة الرابط */
 (function validateWebAppUrl() {
   if (typeof WEBAPP_URL !== "string" || !WEBAPP_URL.trim()) {
     console.error("sheets_api.js: WEBAPP_URL is empty. Paste your GAS Web App /exec URL.");
@@ -32,46 +35,39 @@ const IS_FILE_PROTOCOL = typeof location !== "undefined" && location.protocol ==
   const looksValid = /^https?:\/\/.+\/exec(\?.*)?$/.test(url);
   if (!looksValid) {
     console.warn(
-      "sheets_api.js: WEBAPP_URL might be invalid. It should be a GAS Web App URL ending with /exec. Current:",
+      "sheets_api.js: WEBAPP_URL might be invalid. It should end with /exec. Current:",
       url
     );
   }
 })();
 
-// ==================== أدوات أساسية ====================
+/* ==================== أدوات أساسية ==================== */
 
 async function callSheetsAPI(params = {}, payload = null) {
-  if (IS_FILE_PROTOCOL) {
+  // نقرر وسيلة النقل
+  if (FORCE_JSONP || IS_FILE_PROTOCOL) {
     return callJSONP(params, payload);
-  } else {
-    return callFetch(params, payload);
+  }
+  // جرّب fetch أولاً، وإن فشل (CORS) اسقط على JSONP
+  try {
+    return await callFetch(params, payload);
+  } catch (err) {
+    console.warn("[sheets_api] fetch failed, falling back to JSONP →", err?.message || err);
+    return callJSONP(params, payload);
   }
 }
 
 async function callFetch(params, payload) {
-  if (!WEBAPP_URL || !WEBAPP_URL.trim()) {
-    throw new Error("WEBAPP_URL is not set. Please paste your GAS Web App /exec URL.");
-  }
-  let base = WEBAPP_URL.trim();
-  // إزالة أي مسافات/أسطر زائدة
-  base = base.replace(/\s+/g, "");
-
+  const base = (WEBAPP_URL || "").trim();
+  if (!base) throw new Error("WEBAPP_URL is not set.");
   let u;
-  try {
-    u = new URL(base);
-  } catch (e) {
-    throw new Error("Invalid WEBAPP_URL: " + base);
-  }
+  try { u = new URL(base); } catch (e) { throw new Error("Invalid WEBAPP_URL: " + base); }
 
   const sp = new URLSearchParams(params);
   u.search = sp.toString();
 
   const opts = payload
-    ? {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      }
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
     : { method: "GET" };
 
   const res = await fetch(u.toString(), opts);
@@ -79,51 +75,45 @@ async function callFetch(params, payload) {
     const txt = await safeText(res);
     throw new Error(`HTTP ${res.status} - ${txt || res.statusText}`);
   }
-  return await res.json();
+  return res.json();
 }
 
-async function safeText(res) {
-  try { return await res.text(); } catch { return ""; }
-}
+async function safeText(res) { try { return await res.text(); } catch { return ""; } }
 
 function callJSONP(params, payload) {
-  if (!WEBAPP_URL || !WEBAPP_URL.trim()) {
-    return Promise.reject(new Error("WEBAPP_URL is not set. Please paste your GAS Web App /exec URL."));
-  }
+  const base = (WEBAPP_URL || "").trim();
+  if (!base) return Promise.reject(new Error("WEBAPP_URL is not set."));
   return new Promise((resolve, reject) => {
     const cbName = "cb_" + Math.random().toString(36).slice(2);
     const allParams = { ...params, callback: cbName };
-    if (payload) allParams.body = JSON.stringify(payload);
-
-    const url = WEBAPP_URL.trim() + "?" + new URLSearchParams(allParams).toString();
+    if (payload) {
+      // JSONP هو GET فقط — نمرر الـ payload كسلسلة JSON في الاستعلام
+      allParams.body = JSON.stringify(payload);
+    }
+    const url = base + "?" + new URLSearchParams(allParams).toString();
     const script = document.createElement("script");
     script.src = url;
 
     let done = false;
     window[cbName] = (data) => {
-      if (done) return;
-      done = true;
+      if (done) return; done = true;
       resolve(data);
       cleanup();
     };
-
     script.onerror = () => {
-      if (done) return;
-      done = true;
+      if (done) return; done = true;
       reject(new Error("JSONP load error"));
       cleanup();
     };
-
     function cleanup() {
       try { delete window[cbName]; } catch {}
-      if (script.parentNode) script.parentNode.removeChild(script);
+      script.remove();
     }
-
     document.body.appendChild(script);
   });
 }
 
-// ==================== Patients ====================
+/* ==================== Patients ==================== */
 
 const PatientsAPI = {
   async list() {
@@ -143,7 +133,7 @@ const PatientsAPI = {
   },
 };
 
-// ==================== Reminders ====================
+/* ==================== Reminders ==================== */
 
 const RemindersAPI = {
   async list() {
@@ -163,7 +153,7 @@ const RemindersAPI = {
   },
 };
 
-// ==================== Settings ====================
+/* ==================== Settings ==================== */
 
 const SettingsAPI = {
   async get() {
@@ -178,7 +168,7 @@ const SettingsAPI = {
   },
 };
 
-// ==================== UI ====================
+/* ==================== UI ==================== */
 
 const UIAPI = {
   async get() {
@@ -193,7 +183,7 @@ const UIAPI = {
   },
 };
 
-// ==================== ReferenceRanges ====================
+/* ==================== ReferenceRanges ==================== */
 
 const ReferenceRangesAPI = {
   async list() {
@@ -208,7 +198,7 @@ const ReferenceRangesAPI = {
   },
 };
 
-// ==================== Metadata ====================
+/* ==================== Metadata ==================== */
 
 const MetadataAPI = {
   async get() {
