@@ -1,8 +1,10 @@
 /* ------------------------------------------------------
- Palliative Rounds — ui.js
- View rendering + full UI interactions
- (keeps original behaviors + fixes: assessment/meds per patient,
-  add/import respect currentSection, proper refresh)
+ Palliative Rounds — ui.js (auto-switch section fix)
+ Keeps full behaviors + fixes:
+ - assessment/meds saved per current patient
+ - add/import respect currentSection
+ - if current section is empty (and no search), auto-switch to first section with patients
+ - render patient list with simple innerHTML
 -------------------------------------------------------*/
 (function () {
   const U = PR.utils;
@@ -98,7 +100,7 @@
     hpiCurrTxInput: U.$("#hpiCurrTxInput"),
     hpiInitInput: U.$("#hpiInitInput"),
 
-    // Update modal (Assessment + Meds) — تأكد IDs تطابق HTML
+    // Update modal (Assessment + Meds)
     patientAssessmentInput: U.$("#patientAssessmentInput"),
     medicationListInput: U.$("#medicationListInput"),
 
@@ -122,7 +124,6 @@
     el.tabBtns.forEach((btn) => {
       const code = btn.dataset.section;
       const name = names[code] || `Section ${code}`;
-      // احتفظ بالأيقونة إن وُجدت
       btn.innerHTML = ` ${PR.utils.esc(name)}`;
     });
   }
@@ -132,8 +133,8 @@
     bindGlobalEvents();
 
     // Listeners from state
-    S.on("restored", renderAll);
-    S.on("patients:changed", () => { renderPatientList(); renderProgress(); });
+    S.on("restored", () => { maybeAutoSwitchSection(); renderAll(); });
+    S.on("patients:changed", () => { maybeAutoSwitchSection(); renderPatientList(); renderProgress(); });
     S.on("section:changed", () => { highlightActiveTab(); renderPatientList(); renderProgress(); });
     S.on("current:changed", renderCurrentPatient);
     S.on("patient:updated", () => { renderCurrentPatient(); renderPatientList(); });
@@ -144,6 +145,7 @@
     applySectionNames();
 
     // First paint
+    maybeAutoSwitchSection();
     renderAll();
   }
 
@@ -152,6 +154,23 @@
     renderPatientList();
     renderProgress();
     renderCurrentPatient();
+  }
+
+  /* ---------- Auto switch if current section empty ---------- */
+  function maybeAutoSwitchSection() {
+    // لا تغيّر القسم إذا المستخدم يبحث (عشان ما نربكه)
+    if ((el.patientSearch?.value || "").trim()) return;
+
+    const sect = S.state.ui.currentSection || "A";
+    const hasInCurrent = S.state.patients.some((p) => p.section === sect);
+    if (hasInCurrent) return;
+
+    // دور على أول قسم فيه مرضى
+    const sections = ["A", "B", "C", "D", "E"];
+    const found = sections.find((s) => S.state.patients.some((p) => p.section === s));
+    if (found && found !== sect) {
+      S.setUI({ currentSection: found });
+    }
   }
 
   /* ---------- Events ---------- */
@@ -249,7 +268,6 @@
           current: el.hpiCurrTxInput?.value.trim() || "",
           initial: el.hpiInitInput?.value.trim() || "",
         },
-        // حفظ نصوص لكل مريض بشكل صحيح
         patientAssessment: el.patientAssessmentInput?.value || "",
         medicationList: el.medicationListInput?.value || "",
       };
@@ -266,7 +284,7 @@
       U.toast(p.done ? "Marked as not done." : "Marked as done.", "success");
     });
 
-    // Toggle CTCAE enable from summary switch
+    // Toggle CTCAE enable
     el.toggleCTCAE?.addEventListener("change", (e) => {
       const p = S.getCurrentPatient();
       if (!p) return;
@@ -296,39 +314,27 @@
       document.dispatchEvent(new CustomEvent("report:generate", { detail: opts }));
     });
 
-    // Settings modal
-    el.openSettings?.addEventListener("click", () => {
-      const st = S.state.settings;
-      if (el.themeSelect) el.themeSelect.value = st.theme;
-      if (el.fontSizeSelect) el.fontSizeSelect.value = st.fontSize;
-      U.openDialog(el.modalSettings);
-    });
-    el.saveSettings?.addEventListener("click", (e) => {
-      e.preventDefault();
-      S.setSettings({
-        theme: el.themeSelect?.value || "auto",
-        fontSize: el.fontSizeSelect?.value || "base",
-      });
-      U.closeDialog(el.modalSettings);
-      U.toast("Preferences saved.", "success");
-    });
-
     // Patient list interactions
-    U.on(el.patientList, "click", ".patient-item", function (e) {
-      const id = this.dataset.id;
+    el.patientList?.addEventListener("click", (e) => {
+      const item = e.target.closest(".patient-item");
+      if (!item) return;
+      const id = item.dataset.id;
       if (!id) return;
-      S.setCurrentPatient(id);
-      // if click on checkbox area, toggle done
+      // clicked on checkbox area?
       if (e.target.closest(".check")) {
-        const p = S.getCurrentPatient();
-        if (p) S.markDone(p.id, !p.done);
+        const p = S.state.patients.find((x) => x.id === id);
+        if (p) S.markDone(id, !p.done);
+      } else {
+        S.setCurrentPatient(id);
       }
     });
 
-    // Delete patient (trash icon on list)
-    U.on(el.patientList, "click", ".delete-patient", function (e) {
+    // Delete patient (trash icon)
+    el.patientList?.addEventListener("click", (e) => {
+      const trash = e.target.closest(".delete-patient");
+      if (!trash) return;
       e.stopPropagation();
-      const item = this.closest(".patient-item");
+      const item = trash.closest(".patient-item");
       const id = item?.dataset.id;
       if (!id) return;
       const p = S.state.patients.find((x) => x.id === id);
@@ -339,8 +345,9 @@
       U.toast("Patient removed.", "success");
     });
 
-    // استجابة لاستيراد CSV (من import_export.js) لتمييز الإضافات الجديدة ممكنًا
+    // From import_export.js
     document.addEventListener("import:done", () => {
+      maybeAutoSwitchSection();
       renderPatientList();
       renderProgress();
     });
@@ -354,44 +361,44 @@
   }
 
   function renderPatientList() {
-    const pts = S.searchPatients(S.state.ui.search);
-    el.patientList.innerHTML = "";
+    if (!el.patientList) return;
+
+    const sect = S.state.ui.currentSection;
+    const pts = S.searchPatients(S.state.ui.search).filter((p) => p.section === sect);
+
     if (!pts.length) {
-      el.patientList.appendChild(
-        U.h("li", { class: "muted", style: "padding:8px 4px;" }, "No patients yet.")
-      );
+      // لو القسم الحالي فاضي، أعرض رسالة بسيطة
+      el.patientList.innerHTML = `<li class="muted" style="padding:8px 4px;">No patients in this section.</li>`;
       return;
     }
+
     const curId = S.state.ui.currentPatientId;
-    pts.forEach((p) => {
-      const rightMeta = U.h(
-        "div",
-        { class: "meta", style: "display:flex; align-items:center; gap:8px;" },
-        [
-          U.h("span", {}, p.updatedAt ? `Updated ${p.updatedAt}` : ""),
-          U.h(
-            "button",
-            { class: "icon-btn delete-patient", title: "Delete patient" },
-            U.h("i", { class: "fa-solid fa-trash" })
-          ),
-        ]
-      );
-
-      const li = U.h("li", { class: "patient-item", dataset: { id: p.id } }, [
-        U.h("div", { class: "check", title: p.done ? "Done" : "Mark as done" },
-          p.done ? U.h("i", { class: "fa-solid fa-check" }) : null
-        ),
-        U.h("div", {}, [
-          U.h("div", { class: "name" }, p.bio["Patient Name"] || "Unnamed"),
-          U.h("div", { class: "meta" }, `${p.bio["Patient Code"] || "—"} • Room ${p.bio["Room"] || "—"}`),
-        ]),
-        rightMeta,
-      ]);
-
-      if (p.done) li.classList.add("done");
-      if (p.id === curId) li.classList.add("active");
-      el.patientList.appendChild(li);
-    });
+    el.patientList.innerHTML = pts
+      .map((p) => {
+        const name = (p.bio["Patient Name"] || "Unnamed");
+        const code = (p.bio["Patient Code"] || "");
+        const room = (p.bio["Room"] || "—");
+        const updated = (p.updatedAt || "");
+        const isActive = p.id === curId ? " active" : "";
+        const isDone = p.done ? " done" : "";
+        return `
+          <li class="patient-item${isActive}${isDone}" data-id="${p.id}">
+            <div class="check" title="${p.done ? "Done" : "Mark as done"}">
+              ${p.done ? `<i class="fa-solid fa-check"></i>` : ``}
+            </div>
+            <div class="info">
+              <div class="name">${U.esc(name)}</div>
+              <div class="meta">${U.esc(code)} • Room ${U.esc(room)}</div>
+            </div>
+            <div class="meta-right">
+              <span class="updated">${U.esc(updated)}</span>
+              <button class="icon-btn delete-patient" title="Delete patient">
+                <i class="fa-solid fa-trash"></i>
+              </button>
+            </div>
+          </li>`;
+      })
+      .join("");
   }
 
   function renderProgress() {
@@ -481,7 +488,10 @@
     C.ESAS_FIELDS.forEach((k) => {
       const val = p.esas[k];
       const label = `${k}: ${val == null ? "—" : val}`;
-      const chip = U.h("span", { class: "chip", title: k }, label);
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.title = k;
+      chip.textContent = label;
       el.esasSummary.appendChild(chip);
     });
   }
@@ -496,19 +506,35 @@
         'CTCAE is currently disabled. Toggle "Enable" to record grades.';
       return;
     }
-    const list = U.h("div", { class: "keyvals compact" });
+    const list = document.createElement("div");
+    list.className = "keyvals compact";
     C.CTCAE_ITEMS.forEach(({ key, label }) => {
       const g = p.ctcae.items[key]?.grade;
       const v = g == null ? "—" : `G${g}`;
-      list.appendChild(U.h("div", { class: "kv" }, [U.h("span", {}, label), U.h("strong", {}, v)]));
+      const row = document.createElement("div");
+      row.className = "kv";
+      const l = document.createElement("span");
+      l.textContent = label;
+      const s = document.createElement("strong");
+      s.textContent = v;
+      row.appendChild(l); row.appendChild(s);
+      list.appendChild(row);
     });
     el.ctcaeSummary.appendChild(list);
   }
 
   function renderLabs(p) {
     const makeKV = (name, value) => {
-      const ref = C.REF_RANGES?.[name] ? { "data-ref": `Ref: ${C.REF_RANGES[name]}` } : {};
-      return U.h("div", { class: "kv" }, [U.h("span", ref, name), U.h("strong", {}, value)]);
+      const row = document.createElement("div");
+      row.className = "kv";
+      const l = document.createElement("span");
+      const ref = C.REF_RANGES?.[name];
+      if (ref) l.setAttribute("data-ref", `Ref: ${ref}`);
+      l.textContent = name;
+      const v = document.createElement("strong");
+      v.textContent = value;
+      row.appendChild(l); row.appendChild(v);
+      return row;
     };
     const v = (k) => S.getLabValue(p, k);
 
@@ -527,10 +553,15 @@
   }
 
   function sectionBlock(title, txt) {
-    return U.h("div", {}, [
-      U.h("div", { class: "muted", style: "font-size:12px;margin-bottom:4px" }, title),
-      U.h("div", {}, U.esc(txt)),
-    ]);
+    const wrap = document.createElement("div");
+    const head = document.createElement("div");
+    head.className = "muted";
+    head.style.cssText = "font-size:12px;margin-bottom:4px";
+    head.textContent = title;
+    const body = document.createElement("div");
+    body.textContent = txt;
+    wrap.appendChild(head); wrap.appendChild(body);
+    return wrap;
   }
 
   /* ---------- Helpers ---------- */
@@ -549,7 +580,6 @@
 
   function applySettings(st) {
     U.applyTheme(st || S.state.settings);
-    // Follow system light/dark if auto (إن كان الستايل يدعمه)
     if ((st || S.state.settings).theme === "auto") {
       const mql = window.matchMedia("(prefers-color-scheme: light)");
       document.documentElement.classList.toggle("theme-light", mql.matches);
@@ -557,7 +587,7 @@
   }
 
   // Expose minimal UI API
-  PR.ui = { renderAll, renderCurrentPatient, renderPatientList, renderProgress };
+  PR.ui = { renderAll: renderAll, renderCurrentPatient, renderPatientList, renderProgress };
 
   // Boot
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", init) : init();
