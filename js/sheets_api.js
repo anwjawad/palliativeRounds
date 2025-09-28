@@ -31,7 +31,7 @@
 // ---------- إعداد ----------
 
 // عدّل هذا بالرابط اللي أخدته من Deploy → Web app بالـ Google Apps Script:
-const WEBAPP_URL = "<<< ضع هنا رابط الويب أب من GAS >>>";
+const WEBAPP_URL = "https://script.google.com/macros/s/AKfycbz_ja78AXDQSiZeOKLmadElea7osfo2-3E-F8_lJfwMcmzY2jTuFV-rYNauVlBa9v1uww/exec";
 
 // هل الصفحة شغالة من file:// ؟
 const IS_FILE_PROTOCOL = location.protocol === "file:";
