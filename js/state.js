@@ -1,450 +1,184 @@
 /* ------------------------------------------------------
-   Palliative Rounds — state.js
-   Centralized app state, schema, persistence & events
+ Palliative Rounds — state.js (fixed)
+ Centralized state with per-patient updates, proper section assignment,
+ robust events, and persistence.
 -------------------------------------------------------*/
-
 (function () {
-  const { save, load, uid, fmtTime } = PR.utils;
-  const {
-    HOSPITAL_HEADERS,
-    ESAS_FIELDS,
-    CTCAE_ITEMS,
-    CTCAE_GRADES,
-    LAB_GROUPS,
-    LAB_DEFAULT,
-  } = PR.constants;
+  window.PR = window.PR || {};
+  const LS_KEY = "PR_STATE_V1";
 
-  /* =============== Simple Event Bus =============== */
-  const listeners = {};
-  const on = (evt, fn) => ((listeners[evt] ??= []).push(fn), () => off(evt, fn));
-  const off = (evt, fn) =>
-    (listeners[evt] = (listeners[evt] || []).filter((h) => h !== fn));
-  const emit = (evt, payload) => (listeners[evt] || []).forEach((h) => h(payload));
-
-  /* =============== Schema Helpers =============== */
-
-  // Blank ESAS (1–10; null means not selected)
-  const blankESAS = () =>
-    ESAS_FIELDS.reduce((acc, k) => ((acc[k] = null), acc), {});
-
-  // Blank CTCAE (grades 0–4; null means not selected; enable flag)
-  const blankCTCAE = () => {
-    const o = { enabled: false, items: {} };
-    CTCAE_ITEMS.forEach(({ key, label }) => {
-      o.items[key] = { label, grade: null };
-    });
-    return o;
-  };
-
-  // Blank Labs grouped + extras
-  const blankLabs = () => {
-    const make = (keys) =>
-      keys.reduce((acc, k) => ((acc[k] = null), acc), {});
-    return {
-      group1: make(LAB_GROUPS.group1),
-      group2: make(LAB_GROUPS.group2),
-      group3: make(LAB_GROUPS.group3),
-      crpTrend: "",
-      other: "",
-    };
-  };
-
-  // Blank HPI
-  const blankHPI = () => ({
-    cause: "",
-    previous: "",
-    current: "",
-    initial: "",
-  });
-
-  // Biographical data with exact hospital headers (do not rename keys)
-  const blankBio = () => ({
-    "Patient Code": "",
-    "Patient Name": "",
-    "Patient Age": "",
-    "Room": "",
-    "Admitting Provider": "",
-    "Cause Of Admission": "",
-    "Diet": "",
-    "Isolation": "",
-    "Comments": "",
-  });
-
-  // Patient shell
-  const newPatient = (partial = {}) => ({
-    id: uid("pt"),
-    section: "A", // A/B/C – user tabs
-    done: false,
-    updatedAt: fmtTime(new Date()),
-    bio: { ...blankBio(), ...(partial.bio || {}) },
-    hpi: { ...blankHPI(), ...(partial.hpi || {}) },
-    esas: { ...blankESAS(), ...(partial.esas || {}) },
-    ctcae: partial.ctcae ? partial.ctcae : blankCTCAE(),
-    labs: partial.labs ? partial.labs : blankLabs(),
-    latestNotes: partial.latestNotes || "",
-    patientAssessment: partial.patientAssessment || "",
-    medicationList: partial.medicationList || "",
-  });
-
-  const ensureSchema = (p) => {
-    // Ensure forward-compatibility if schema evolves
-    p.bio = { ...blankBio(), ...(p.bio || {}) };
-    p.hpi = { ...blankHPI(), ...(p.hpi || {}) };
-    p.esas = { ...blankESAS(), ...(p.esas || {}) };
-    if (!p.ctcae) p.ctcae = blankCTCAE();
-    else {
-      const base = blankCTCAE();
-      p.ctcae.enabled = !!p.ctcae.enabled;
-      // migrate items
-      Object.keys(base.items).forEach((k) => {
-        const cur = p.ctcae.items?.[k];
-        base.items[k].grade =
-          cur && CTCAE_GRADES.includes(Number(cur.grade))
-            ? Number(cur.grade)
-            : (cur?.grade === 0 ? 0 : null);
-      });
-      p.ctcae.items = base.items;
-    }
-    if (!p.labs) p.labs = blankLabs();
-    else {
-      ["group1", "group2", "group3"].forEach((g) => {
-        p.labs[g] = { ...blankLabs()[g], ...(p.labs[g] || {}) };
-      });
-      p.labs.crpTrend = p.labs.crpTrend || "";
-      p.labs.other = p.labs.other || "";
-    }
-    p.section = p.section || "A";
-    p.done = !!p.done;
-    p.updatedAt = p.updatedAt || fmtTime(new Date());
-    p.latestNotes = p.latestNotes || "";
-    p.patientAssessment = p.patientAssessment || "";
-    p.medicationList = p.medicationList || "";
-    return p;
-  };
-
-  /* =============== Persistence Keys =============== */
-  const K = {
-    patients: "patients",
-    reminders: "reminders",
-    settings: "settings",
-    ui: "ui",
-  };
-
-  /* =============== In-memory State =============== */
-  const state = {
-    patients: [],
-    reminders: [],
-    settings: {
-      theme: "auto", // auto | light | dark (handled in ui.js via prefers-color-scheme)
-      fontSize: "base", // base | lg | xl
+  const S = {
+    state: {
+      patients: [],
+      reminders: [],
+      settings: {
+        // يمكن أن تضيف إعداداتك الافتراضية هنا
+        defaultSection: "A",
+      },
+      ui: {
+        currentSection: "A",
+        currentPatientId: null,
+      },
     },
-    ui: {
-      currentSection: "A",
-      currentPatientId: null,
-      search: "",
+
+    /* ------------- Events Bus ------------- */
+    _listeners: {},
+    on(evt, cb) {
+      (this._listeners[evt] = this._listeners[evt] || []).push(cb);
     },
-  };
+    off(evt, cb) {
+      const arr = this._listeners[evt] || [];
+      const i = arr.indexOf(cb);
+      if (i >= 0) arr.splice(i, 1);
+    },
+    emit(evt, payload) {
+      const arr = this._listeners[evt] || [];
+      for (const cb of arr) {
+        try { cb(payload); } catch (e) { console.error(e); }
+      }
+    },
 
-  /* =============== CRUD: Patients =============== */
-  const addPatient = (partial) => {
-    const p = ensureSchema(newPatient(partial));
-    state.patients.push(p);
-    persist("patients");
-    emit("patients:changed", state.patients);
-    return p.id;
-  };
+    /* ------------- Persistence ------------- */
+    persist() {
+      try {
+        const { patients, reminders, settings, ui } = this.state;
+        localStorage.setItem(LS_KEY, JSON.stringify({ patients, reminders, settings, ui }));
+      } catch (e) {
+        console.error("persist failed:", e);
+      }
+    },
+    _load() {
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          this.state.patients = Array.isArray(parsed.patients) ? parsed.patients.map(this.ensureSchema) : [];
+          this.state.reminders = Array.isArray(parsed.reminders) ? parsed.reminders : [];
+          this.state.settings = { ...(this.state.settings || {}), ...(parsed.settings || {}) };
+          this.state.ui = { ...(this.state.ui || {}), ...(parsed.ui || {}) };
+        }
+      } catch (e) {
+        console.error("load failed:", e);
+      }
+    },
 
-  const updatePatient = (id, patch) => {
-    const idx = state.patients.findIndex((p) => p.id === id);
-    if (idx === -1) return false;
-    const cur = state.patients[idx];
-    const merged = ensureSchema({
-      ...cur,
-      ...patch,
-      bio: patch.bio ? { ...cur.bio, ...patch.bio } : cur.bio,
-      hpi: patch.hpi ? { ...cur.hpi, ...patch.hpi } : cur.hpi,
-      esas: patch.esas ? { ...cur.esas, ...patch.esas } : cur.esas,
-      ctcae: patch.ctcae ? { ...cur.ctcae, ...patch.ctcae } : cur.ctcae,
-      labs: patch.labs ? deepMerge(cur.labs, patch.labs) : cur.labs,
-    });
-    merged.updatedAt = fmtTime(new Date());
-    state.patients[idx] = merged;
-    persist("patients");
-    emit("patient:updated", merged);
-    if (state.ui.currentPatientId === id) emit("current:changed", merged);
-    return true;
-  };
+    /* ------------- Helpers ------------- */
+    _nowISO() { return new Date().toISOString(); },
+    _uuid() {
+      return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+        : ("id_" + Math.random().toString(36).slice(2) + Date.now().toString(36));
+    },
+    ensureSchema(p0) {
+      const p = p0 || {};
+      p.id = p.id || S._uuid();
+      p.section = p.section || "A";
+      p.updatedAt = p.updatedAt || S._nowISO();
+      p.bio = p.bio || {};
+      p.hpi = p.hpi || {};
+      p.vitals = p.vitals || {};
+      // الحقول التي تسبب المشكلة يجب أن تكون على مستوى المريض
+      p.assessment = (typeof p.assessment === "string") ? p.assessment : "";       // Patient assessment
+      p.medications = Array.isArray(p.medications) ? p.medications : [];           // List of medication
+      // مجموعات بيانات أخرى
+      p.ctcae = Array.isArray(p.ctcae) ? p.ctcae : [];
+      p.esas = Array.isArray(p.esas) ? p.esas : [];
+      p.labs = Array.isArray(p.labs) ? p.labs : [];
+      p.notes = Array.isArray(p.notes) ? p.notes : [];
+      p.timeline = Array.isArray(p.timeline) ? p.timeline : [];
+      p.attachments = Array.isArray(p.attachments) ? p.attachments : [];
+      p.meds = Array.isArray(p.meds) ? p.meds : []; // إن كان المشروع يستخدم مجموعة meds منفصلة
+      return p;
+    },
 
-  const deepMerge = (a, b) => {
-    const o = { ...a };
-    Object.keys(b || {}).forEach((k) => {
-      if (b[k] && typeof b[k] === "object" && !Array.isArray(b[k])) {
-        o[k] = deepMerge(a[k] || {}, b[k]);
+    /* ------------- Query ------------- */
+    getCurrentPatient() {
+      const id = this.state.ui.currentPatientId;
+      if (!id) return null;
+      return this.state.patients.find(x => x.id === id) || null;
+    },
+    getPatientById(id) {
+      return this.state.patients.find(x => x.id === id) || null;
+    },
+
+    /* ------------- Mutations ------------- */
+    setCurrentSection(section) {
+      if (!section) return;
+      this.state.ui.currentSection = section;
+      this.persist();
+      this.emit("section:changed", section);
+    },
+    setCurrentPatient(id) {
+      const p = this.getPatientById(id);
+      this.state.ui.currentPatientId = p ? p.id : null;
+      this.persist();
+      this.emit("current:changed", this.getCurrentPatient());
+    },
+    addPatient(bioOrPatient = {}) {
+      const section = this.state.ui.currentSection || this.state.settings.defaultSection || "A";
+      let newPatient;
+      if (bioOrPatient && (bioOrPatient.bio || bioOrPatient.id)) {
+        newPatient = this.ensureSchema({ ...bioOrPatient });
+        if (!newPatient.section) newPatient.section = section; // احترام القسم الحالي
       } else {
-        o[k] = b[k];
+        newPatient = this.ensureSchema({ bio: { ...(bioOrPatient || {}) }, section });
       }
-    });
-    return o;
-  };
+      newPatient.updatedAt = this._nowISO();
+      this.state.patients.push(newPatient);
+      this.state.ui.currentPatientId = newPatient.id; // الانتقال عليه مباشرة
+      this.persist();
+      this.emit("patients:changed", this.state.patients);
+      this.emit("current:changed", newPatient);
+      return newPatient;
+    },
+    updatePatientById(id, patch = {}) {
+      const idx = this.state.patients.findIndex(x => x.id === id);
+      if (idx === -1) return null;
+      const merged = { ...this.ensureSchema(this.state.patients[idx]), ...patch, updatedAt: this._nowISO() };
+      this.state.patients[idx] = merged;
+      this.persist();
+      this.emit("patients:changed", this.state.patients);
+      if (this.state.ui.currentPatientId === id) this.emit("current:changed", merged);
+      return merged;
+    },
+    updateCurrentPatient(patch = {}) {
+      const cur = this.getCurrentPatient();
+      if (!cur) return null;
+      return this.updatePatientById(cur.id, patch);
+    },
 
-  const removePatient = (id) => {
-    const idx = state.patients.findIndex((p) => p.id === id);
-    if (idx === -1) return false;
-    const [removed] = state.patients.splice(idx, 1);
-    if (state.ui.currentPatientId === id) state.ui.currentPatientId = null;
-    persist("patients");
-    emit("patients:changed", state.patients);
-    return removed;
-  };
-
-  const setSection = (id, section) => updatePatient(id, { section });
-
-  const setCurrentPatient = (id) => {
-    state.ui.currentPatientId = id;
-    persist("ui");
-    emit("current:changed", getCurrentPatient());
-  };
-
-  const getCurrentPatient = () =>
-    state.patients.find((p) => p.id === state.ui.currentPatientId) || null;
-
-  const markDone = (id, done = true) => updatePatient(id, { done });
-
-  const progress = () => {
-    const pts = state.patients.filter((p) => p.section === state.ui.currentSection);
-    if (!pts.length) return 0;
-    const doneCount = pts.filter((p) => p.done).length;
-    return Math.round((doneCount / pts.length) * 100);
-  };
-
-  const searchPatients = (q = "") => {
-    const s = q.trim().toLowerCase();
-    const sect = state.ui.currentSection;
-    return state.patients
-      .filter((p) => p.section === sect)
-      .filter((p) => {
-        if (!s) return true;
-        const blob = [
-          p.bio["Patient Code"],
-          p.bio["Patient Name"],
-          p.bio["Patient Age"],
-          p.bio["Room"],
-          p.bio["Admitting Provider"],
-          p.bio["Cause Of Admission"],
-          p.bio["Diet"],
-          p.bio["Isolation"],
-          p.bio["Comments"],
-        ]
-          .join(" ")
-          .toLowerCase();
-        return blob.includes(s);
-      })
-      .sort((a, b) => a.bio["Patient Name"].localeCompare(b.bio["Patient Name"]));
-  };
-
-  /* =============== Labs helpers =============== */
-  const getLabValue = (patient, key) => {
-    const { labs } = patient || {};
-    if (!labs) return LAB_DEFAULT;
-    for (const g of ["group1", "group2", "group3"]) {
-      if (key in labs[g]) {
-        return labs[g][key] == null || labs[g][key] === ""
-          ? LAB_DEFAULT
-          : String(labs[g][key]);
+    /* ------------- CSV helpers used by import_export.js ------------- */
+    importRows(rows) {
+      // rows هي صفوف CSV بترتيب PR.constants.HOSPITAL_HEADERS
+      let count = 0;
+      for (const r of rows) {
+        // حوّل الـrow إلى bio
+        const bio = { ...r };
+        // احترم القسم الحالي أثناء الاستيراد (ومع ذلك import_export.js صار يقدر يجهّز section لاحقًا)
+        this.addPatient({ bio, section: this.state.ui.currentSection || this.state.settings.defaultSection || "A" });
+        count++;
       }
-    }
-    if (key === "CRP Trend") return labs.crpTrend || "";
-    if (key === "Other") return labs.other || "";
-    return LAB_DEFAULT;
+      return count;
+    },
+    exportRows() {
+      // يعتمد على HOSPITAL_HEADERS لو متوفرة
+      const headers = (window.PR && PR.constants && PR.constants.HOSPITAL_HEADERS) || [];
+      if (!headers.length) {
+        // رجّع دمج بسيط لكل bio
+        return this.state.patients.map(p => ({ ...(p.bio || {}) }));
+      }
+      return this.state.patients.map(p => {
+        const row = {};
+        for (const h of headers) row[h] = (p.bio && (p.bio[h] ?? "")) || "";
+        return row;
+      });
+    },
   };
 
-  /* =============== CSV Import/Export =============== */
-  const importRows = (rows) => {
-    // rows: array of objects with EXACT HOSPITAL_HEADERS keys
-    const createdIds = [];
-    rows.forEach((row) => {
-      const bio = blankBio();
-      HOSPITAL_HEADERS.forEach((h) => (bio[h] = row[h] ?? ""));
-      const id = addPatient({ bio });
-      createdIds.push(id);
-    });
-    emit("import:done", createdIds);
-    return createdIds.length;
-  };
+  // init
+  S._load();
+  // تأكيد السكيمات للمرضى المحفوظين
+  S.state.patients = (S.state.patients || []).map(S.ensureSchema);
 
-  const exportRows = () => {
-    // Export exactly hospital headers + keep for round-trip
-    return state.patients.map((p) => ({ ...p.bio }));
-  };
-
-  /* =============== Reminders =============== */
-  const addReminder = (text, forPatientId = null) => {
-    const r = {
-      id: uid("rem"),
-      text,
-      forPatientId,
-      createdAt: fmtTime(new Date()),
-      done: false,
-    };
-    state.reminders.push(r);
-    persist("reminders");
-    emit("reminders:changed", state.reminders);
-    return r.id;
-  };
-
-  const toggleReminder = (id, done) => {
-    const r = state.reminders.find((x) => x.id === id);
-    if (!r) return false;
-    r.done = done ?? !r.done;
-    persist("reminders");
-    emit("reminders:changed", state.reminders);
-    return true;
-  };
-
-  const removeReminder = (id) => {
-    const i = state.reminders.findIndex((x) => x.id === id);
-    if (i === -1) return false;
-    state.reminders.splice(i, 1);
-    persist("reminders");
-    emit("reminders:changed", state.reminders);
-    return true;
-  };
-
-  /* =============== Settings / UI =============== */
-  const setSettings = (patch) => {
-    state.settings = { ...state.settings, ...patch };
-    persist("settings");
-    emit("settings:changed", state.settings);
-  };
-
-  const setUI = (patch) => {
-    state.ui = { ...state.ui, ...patch };
-    persist("ui");
-    if ("currentSection" in patch) emit("section:changed", state.ui.currentSection);
-    if ("currentPatientId" in patch) emit("current:changed", getCurrentPatient());
-  };
-
-  /* =============== Persistence =============== */
-  const persist = (which) => {
-    switch (which) {
-      case "patients":
-        save(K.patients, state.patients);
-        break;
-      case "reminders":
-        save(K.reminders, state.reminders);
-        break;
-      case "settings":
-        save(K.settings, state.settings);
-        break;
-      case "ui":
-        save(K.ui, state.ui);
-        break;
-      default:
-        save(K.patients, state.patients);
-        save(K.reminders, state.reminders);
-        save(K.settings, state.settings);
-        save(K.ui, state.ui);
-    }
-  try { PR.cloud?.ready && PR.cloud.saveAll(state); } catch {}
-
-  };
-
-  const restore = () => {
-    state.patients = (load(K.patients, []) || []).map(ensureSchema);
-    state.reminders = load(K.reminders, []) || [];
-    state.settings = { ...state.settings, ...(load(K.settings, {}) || {}) };
-    state.ui = { ...state.ui, ...(load(K.ui, {}) || {}) };
-
-    // Seed demo data if first run
-    if (!state.patients.length) {
-      const demo = [
-        {
-          bio: {
-            "Patient Code": "P-001",
-            "Patient Name": "John Carter",
-            "Patient Age": "67",
-            "Room": "A12",
-            "Admitting Provider": "Dr. Smith",
-            "Cause Of Admission": "Dyspnea, infection",
-            "Diet": "Soft",
-            "Isolation": "None",
-            "Comments": "N/A",
-          },
-          hpi: {
-            cause: "Dyspnea with productive cough.",
-            previous: "Chemo (FOLFOX) completed 6m ago.",
-            current: "Piperacillin/Tazobactam; O2 2L NC.",
-            initial: "RR 22, SpO2 93% on air.",
-          },
-          labs: {
-            group1: { WBC: "10.2", HGB: "12.8", PLT: "210", ANC: "6.2", CRP: "24", Albumin: "3.4" },
-            group2: { "Sodium (Na)": "139", "Potassium (K)": "4.0", "Chloride (Cl)": "103", "Calcium (Ca)": "9.1", "Phosphorus (Ph)": "3.2", "Alkaline Phosphatase (ALP)": "110" },
-            group3: { "Creatinine (Scr)": "1.0", BUN: "18", "Total Bile": "0.8", Other: "" },
-            crpTrend: "38→32→24",
-            other: "",
-          },
-          section: "A",
-          latestNotes: "Slept better; SOB improving.",
-        },
-        {
-          bio: {
-            "Patient Code": "P-002",
-            "Patient Name": "Maria Lopez",
-            "Patient Age": "58",
-            "Room": "B07",
-            "Admitting Provider": "Dr. Chen",
-            "Cause Of Admission": "Pain control",
-            "Diet": "Regular",
-            "Isolation": "None",
-            "Comments": "",
-          },
-          section: "B",
-        },
-      ];
-      demo.forEach((d) => addPatient(d));
-      emit("seed:demo", true);
-    }
-
-    emit("restored", true);
-  };
-
-  /* =============== Public API =============== */
-  PR.state = {
-    state,
-    // events
-    on, off, emit,
-    // patients
-    addPatient,
-    updatePatient,
-    removePatient,
-    setSection,
-    setCurrentPatient,
-    getCurrentPatient,
-    markDone,
-    progress,
-    searchPatients,
-    // labs helpers
-    getLabValue,
-    // csv
-    importRows,
-    exportRows,
-    // reminders
-    addReminder,
-    toggleReminder,
-    removeReminder,
-    // settings/ui
-    setSettings,
-    setUI,
-    // lifecycle
-    restore,
-    persist,
-    // schema
-    blankESAS,
-    blankCTCAE,
-    blankLabs,
-    blankHPI,
-    blankBio,
-    newPatient,
-    ensureSchema,
-  };
+  window.PR.state = S;
 })();
