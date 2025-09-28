@@ -17,7 +17,7 @@
 
 /* ==================== إعداد ==================== */
 // ضع هنا رابط الـ Web App من GAS (الذي ينتهي بـ /exec)
-const WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwEyhcRBHp-M44H4c0KqsDQO3jfvAWm1G8ITUck3N9cSZ73ScqLpo8c8NszyPRo7_ATlg/exec";
+const WEBAPP_URL = "https://script.google.com/macros/s/AKfycbyMJH0C9a9wbwhW0UwfnOPtlCWmdH7Oucng0yGgi1pugdNFt8TFmrvB3FIMvHcfXIt3qA/exec";
 
 // إجبار JSONP (مفيد على GitHub Pages لتجنب CORS نهائياً)
 const FORCE_JSONP = true;
