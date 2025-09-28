@@ -1,8 +1,9 @@
 /* ------------------------------------------------------
-   Palliative Rounds — ui.js
-   View rendering + core UI interactions (no data logic)
+ Palliative Rounds — ui.js
+ View rendering + full UI interactions
+ (keeps original behaviors + fixes: assessment/meds per patient,
+  add/import respect currentSection, proper refresh)
 -------------------------------------------------------*/
-
 (function () {
   const U = PR.utils;
   const S = PR.state;
@@ -10,20 +11,24 @@
 
   /* ---------- Cache DOM ---------- */
   const el = {
+    // Tabs / sections
     tabs: U.$(".tabs"),
     tabBtns: U.$$(".tab"),
+    clearSectionBtn: U.$("#clearSectionBtn"),
+
+    // Left: roster & search
     patientSearch: U.$("#patientSearch"),
     patientList: U.$("#patientList"),
     progressPct: U.$("#progressPct"),
     progressFill: U.$("#progressFill"),
 
-    // center pane
+    // Center: header & actions
     currentPatientName: U.$("#currentPatientName"),
     editPatientBtn: U.$("#editPatientBtn"),
     markDoneBtn: U.$("#markDoneBtn"),
     reminderBtn: U.$("#reminderBtn"),
 
-    // bio cards
+    // Bio (center)
     bioCode: U.$("#bioCode"),
     bioName: U.$("#bioName"),
     bioAge: U.$("#bioAge"),
@@ -34,27 +39,26 @@
     bioIso: U.$("#bioIso"),
     bioComments: U.$("#bioComments"),
 
-    // HPI card
+    // HPI (center)
     hpiCause: U.$("#hpiCause"),
     hpiPrevTx: U.$("#hpiPrevTx"),
     hpiCurrTx: U.$("#hpiCurrTx"),
     hpiInit: U.$("#hpiInit"),
 
-    // ESAS summary
+    // ESAS & CTCAE summaries
     esasSummary: U.$("#esasSummary"),
-
-    // CTCAE summary and toggle
     ctcaeSummary: U.$("#ctcaeSummary"),
     toggleCTCAE: U.$("#toggleCTCAE"),
 
-    // Labs groups
+    // Labs summaries
     labsGroup1: U.$("#labsGroup1"),
     labsGroup2: U.$("#labsGroup2"),
     labsGroup3: U.$("#labsGroup3"),
 
+    // Latest notes (compact)
     latestNotes: U.$("#latestNotes"),
 
-    // Quick actions (right)
+    // Right: quick actions
     includeBiographical: U.$("#includeBiographical"),
     includeHPI: U.$("#includeHPI"),
     includeESAS: U.$("#includeESAS"),
@@ -76,7 +80,7 @@
     modalOCR: U.$("#modalOCR"),
     modalSettings: U.$("#modalSettings"),
 
-    // Quick add form (subset)
+    // Quick add form
     qpCode: U.$("#qpCode"),
     qpName: U.$("#qpName"),
     qpAge: U.$("#qpAge"),
@@ -88,19 +92,23 @@
     qpComments: U.$("#qpComments"),
     qpSave: U.$("#qpSave"),
 
-    // Update modal key fields (HPI only; ESAS/CTCAE/Labs managed in their files)
+    // Update modal (HPI)
     hpiCauseInput: U.$("#hpiCauseInput"),
     hpiPrevTxInput: U.$("#hpiPrevTxInput"),
     hpiCurrTxInput: U.$("#hpiCurrTxInput"),
     hpiInitInput: U.$("#hpiInitInput"),
 
+    // Update modal (Assessment + Meds) — تأكد IDs تطابق HTML
+    patientAssessmentInput: U.$("#patientAssessmentInput"),
+    medicationListInput: U.$("#medicationListInput"),
+
+    // Update modal save/cancel
+    updateSave: U.$("#updateSave"),
+
     // Preferences
     themeSelect: U.$("#themeSelect"),
     fontSizeSelect: U.$("#fontSizeSelect"),
     saveSettings: U.$("#saveSettings"),
-
-    // New additions for requested features
-    clearSectionBtn: U.$("#clearSectionBtn"),
   };
 
   /* ---------- Section Names (rename tabs, local persistence only) ---------- */
@@ -108,48 +116,34 @@
   function loadSectionNames() {
     return PR.utils.load(SECTION_NAMES_KEY, { A: "Section A", B: "Section B", C: "Section C" }) || { A: "Section A", B: "Section B", C: "Section C" };
   }
-  function saveSectionNames(map) {
-    PR.utils.save(SECTION_NAMES_KEY, map);
-  }
+  function saveSectionNames(map) { PR.utils.save(SECTION_NAMES_KEY, map); }
   function applySectionNames() {
     const names = loadSectionNames();
     el.tabBtns.forEach((btn) => {
       const code = btn.dataset.section;
       const name = names[code] || `Section ${code}`;
-      // keep the icon, replace the text after it
-      btn.innerHTML = `<i class="fa-solid fa-layer-group"></i> ${PR.utils.esc(name)}`;
+      // احتفظ بالأيقونة إن وُجدت
+      btn.innerHTML = ` ${PR.utils.esc(name)}`;
     });
   }
 
   /* ---------- Init ---------- */
   function init() {
     bindGlobalEvents();
-    S.on("restored", renderAll);
-    S.on("patients:changed", () => {
-      renderPatientList();
-      renderProgress();
-    });
-    S.on("section:changed", () => {
-      highlightActiveTab();
-      renderPatientList();
-      renderProgress();
-    });
-    S.on("current:changed", renderCurrentPatient);
-    S.on("patient:updated", () => {
-      renderCurrentPatient();
-      renderPatientList(); // meta can change
-    });
-    S.on("settings:changed", applySettings);
-    S.on("reminders:changed", () => {
-      // right pane updated by reminders.js; no-op here
-    });
 
-    // apply existing preferences immediately
+    // Listeners from state
+    S.on("restored", renderAll);
+    S.on("patients:changed", () => { renderPatientList(); renderProgress(); });
+    S.on("section:changed", () => { highlightActiveTab(); renderPatientList(); renderProgress(); });
+    S.on("current:changed", renderCurrentPatient);
+    S.on("patient:updated", () => { renderCurrentPatient(); renderPatientList(); });
+    S.on("settings:changed", applySettings);
+
+    // Apply preferences immediately + section names
     applySettings(S.state.settings);
-    // apply custom section names (non-invasive)
     applySectionNames();
 
-    // initial draws
+    // First paint
     renderAll();
   }
 
@@ -162,14 +156,14 @@
 
   /* ---------- Events ---------- */
   function bindGlobalEvents() {
-    // Tabs (switch section)
+    // Tabs switching
     U.on(el.tabs, "click", ".tab", function () {
       const section = this.dataset.section;
       S.setUI({ currentSection: section, search: "" });
-      el.patientSearch.value = "";
+      if (el.patientSearch) el.patientSearch.value = "";
     });
 
-    // Rename section on double-click (pure UI; persisted locally)
+    // Rename section (double click)
     U.on(el.tabs, "dblclick", ".tab", function () {
       const code = this.dataset.section;
       const names = loadSectionNames();
@@ -182,36 +176,27 @@
       U.toast("Section renamed.", "success");
     });
 
-    // Clear current section (delete all patients in that section)
+    // Clear current section
     el.clearSectionBtn?.addEventListener("click", () => {
       const sect = S.state.ui.currentSection;
       const pts = S.state.patients.filter((p) => p.section === sect);
-      if (!pts.length) {
-        U.toast("No patients to clear in this section.", "warn");
-        return;
-      }
+      if (!pts.length) { U.toast("No patients to clear in this section.", "warn"); return; }
       const ok = window.confirm(`Clear all patients in ${sect}? This cannot be undone.`);
       if (!ok) return;
-      // remove one by one using existing state API (no logic changes)
       pts.map((p) => p.id).forEach((id) => S.removePatient(id));
       U.toast("Section cleared.", "success");
     });
 
     // Search
-    el.patientSearch.addEventListener(
+    el.patientSearch?.addEventListener(
       "input",
-      U.debounce((e) => {
-        S.setUI({ search: e.target.value });
-        renderPatientList();
-      }, 150)
+      U.debounce((e) => { S.setUI({ search: e.target.value }); renderPatientList(); }, 150)
     );
 
-    // Quick Add
-    el.addQuickPatient.addEventListener("click", () => {
-      resetQuickAddForm();
-      U.openDialog(el.modalQuickPatient);
-    });
-    el.qpSave.addEventListener("click", (e) => {
+    // Quick Add modal
+    el.addQuickPatient?.addEventListener("click", () => { resetQuickAddForm(); U.openDialog(el.modalQuickPatient); });
+
+    el.qpSave?.addEventListener("click", (e) => {
       e.preventDefault();
       const bio = {
         "Patient Code": el.qpCode.value.trim(),
@@ -234,83 +219,104 @@
       U.toast("Patient added.", "success");
     });
 
-    // Open Update modal (populate basic HPI; other sections handled by their modules)
-    el.editPatientBtn.addEventListener("click", () => {
+    // Open Update modal (populate current values)
+    el.editPatientBtn?.addEventListener("click", () => {
       const p = S.getCurrentPatient();
       if (!p) return;
-      el.hpiCauseInput.value = p.hpi.cause || "";
-      el.hpiPrevTxInput.value = p.hpi.previous || "";
-      el.hpiCurrTxInput.value = p.hpi.current || "";
-      el.hpiInitInput.value = p.hpi.initial || "";
+      // HPI
+      if (el.hpiCauseInput) el.hpiCauseInput.value = p.hpi.cause || "";
+      if (el.hpiPrevTxInput) el.hpiPrevTxInput.value = p.hpi.previous || "";
+      if (el.hpiCurrTxInput) el.hpiCurrTxInput.value = p.hpi.current || "";
+      if (el.hpiInitInput) el.hpiInitInput.value = p.hpi.initial || "";
+      // Assessment & Meds
+      if (el.patientAssessmentInput) el.patientAssessmentInput.value = p.patientAssessment || "";
+      if (el.medicationListInput) el.medicationListInput.value = p.medicationList || "";
+      // Open dialog
       U.openDialog(el.modalUpdate);
-      // other modules (esas.js / ctcae.js / labs.js) will populate their areas on dialog open
+      // notify modules to populate their parts
       document.dispatchEvent(new CustomEvent("modal:update:open", { detail: { patientId: p.id } }));
     });
 
-    // Mark done
-    el.markDoneBtn.addEventListener("click", () => {
+    // Save Update modal
+    el.updateSave?.addEventListener("click", (e) => {
+      e.preventDefault();
+      const p = S.getCurrentPatient();
+      if (!p) return;
+      const patch = {
+        hpi: {
+          cause: el.hpiCauseInput?.value.trim() || "",
+          previous: el.hpiPrevTxInput?.value.trim() || "",
+          current: el.hpiCurrTxInput?.value.trim() || "",
+          initial: el.hpiInitInput?.value.trim() || "",
+        },
+        // حفظ نصوص لكل مريض بشكل صحيح
+        patientAssessment: el.patientAssessmentInput?.value || "",
+        medicationList: el.medicationListInput?.value || "",
+      };
+      S.updatePatient(p.id, patch);
+      U.closeDialog(el.modalUpdate);
+      U.toast("Patient updated.", "success");
+    });
+
+    // Mark done toggle
+    el.markDoneBtn?.addEventListener("click", () => {
       const p = S.getCurrentPatient();
       if (!p) return;
       S.markDone(p.id, !p.done);
       U.toast(p.done ? "Marked as not done." : "Marked as done.", "success");
     });
 
-    // Toggle CTCAE from summary card (enables inputs when opening Update modal too)
-    el.toggleCTCAE.addEventListener("change", (e) => {
+    // Toggle CTCAE enable from summary switch
+    el.toggleCTCAE?.addEventListener("change", (e) => {
       const p = S.getCurrentPatient();
       if (!p) return;
       S.updatePatient(p.id, { ctcae: { ...p.ctcae, enabled: e.target.checked } });
-      renderCTCAESummary(S.getCurrentPatient()); // refresh view
+      renderCTCAESummary(S.getCurrentPatient());
       U.toast(e.target.checked ? "CTCAE enabled." : "CTCAE disabled.", "success");
-      el.includeCTCAE.checked = e.target.checked; // sync report option
+      if (el.includeCTCAE) el.includeCTCAE.checked = e.target.checked; // sync report option
     });
 
-    // OCR modal
-    el.ocrOpen.addEventListener("click", () => U.openDialog(el.modalOCR));
+    // OCR
+    el.ocrOpen?.addEventListener("click", () => U.openDialog(el.modalOCR));
 
-    // Import/Export (actual logic in import_export.js)
-    el.csvImport.addEventListener("change", () =>
-      document.dispatchEvent(new Event("csv:import"))
-    );
-    el.exportCSV.addEventListener("click", () =>
-      document.dispatchEvent(new Event("csv:export"))
-    );
-    el.exportPDF.addEventListener("click", () =>
-      document.dispatchEvent(new Event("pdf:export"))
-    );
+    // Import/Export triggers (logic lives in import_export.js)
+    el.csvImport?.addEventListener("change", () => document.dispatchEvent(new Event("csv:import")));
+    el.exportCSV?.addEventListener("click", () => document.dispatchEvent(new Event("csv:export")));
+    el.exportPDF?.addEventListener("click", () => document.dispatchEvent(new Event("pdf:export")));
 
-    // Report Generation (handled in reports.js; we just emit intent)
-    el.generateReport.addEventListener("click", () => {
+    // Report generation (handled in reports.js)
+    el.generateReport?.addEventListener("click", () => {
       const opts = {
-        bio: el.includeBiographical.checked,
-        hpi: el.includeHPI.checked,
-        esas: el.includeESAS.checked,
-        ctcae: el.includeCTCAE.checked,
-        labs: el.includeLabs.checked,
+        bio: el.includeBiographical?.checked,
+        hpi: el.includeHPI?.checked,
+        esas: el.includeESAS?.checked,
+        ctcae: el.includeCTCAE?.checked,
+        labs: el.includeLabs?.checked,
       };
       document.dispatchEvent(new CustomEvent("report:generate", { detail: opts }));
     });
 
-    // Settings
-    el.openSettings.addEventListener("click", () => {
+    // Settings modal
+    el.openSettings?.addEventListener("click", () => {
       const st = S.state.settings;
-      el.themeSelect.value = st.theme;
-      el.fontSizeSelect.value = st.fontSize;
+      if (el.themeSelect) el.themeSelect.value = st.theme;
+      if (el.fontSizeSelect) el.fontSizeSelect.value = st.fontSize;
       U.openDialog(el.modalSettings);
     });
-    el.saveSettings.addEventListener("click", (e) => {
+    el.saveSettings?.addEventListener("click", (e) => {
       e.preventDefault();
       S.setSettings({
-        theme: el.themeSelect.value,
-        fontSize: el.fontSizeSelect.value,
+        theme: el.themeSelect?.value || "auto",
+        fontSize: el.fontSizeSelect?.value || "base",
       });
       U.closeDialog(el.modalSettings);
       U.toast("Preferences saved.", "success");
     });
 
-    // Patient list clicks (select / toggle done)
+    // Patient list interactions
     U.on(el.patientList, "click", ".patient-item", function (e) {
       const id = this.dataset.id;
+      if (!id) return;
       S.setCurrentPatient(id);
       // if click on checkbox area, toggle done
       if (e.target.closest(".check")) {
@@ -319,7 +325,7 @@
       }
     });
 
-    // NEW: Delete a single patient (icon button)
+    // Delete patient (trash icon on list)
     U.on(el.patientList, "click", ".delete-patient", function (e) {
       e.stopPropagation();
       const item = this.closest(".patient-item");
@@ -331,6 +337,12 @@
       if (!ok) return;
       S.removePatient(id);
       U.toast("Patient removed.", "success");
+    });
+
+    // استجابة لاستيراد CSV (من import_export.js) لتمييز الإضافات الجديدة ممكنًا
+    document.addEventListener("import:done", () => {
+      renderPatientList();
+      renderProgress();
     });
   }
 
@@ -366,21 +378,16 @@
       );
 
       const li = U.h("li", { class: "patient-item", dataset: { id: p.id } }, [
-        U.h(
-          "div",
-          { class: "check", title: p.done ? "Done" : "Mark as done" },
+        U.h("div", { class: "check", title: p.done ? "Done" : "Mark as done" },
           p.done ? U.h("i", { class: "fa-solid fa-check" }) : null
         ),
         U.h("div", {}, [
           U.h("div", { class: "name" }, p.bio["Patient Name"] || "Unnamed"),
-          U.h(
-            "div",
-            { class: "meta" },
-            `${p.bio["Patient Code"] || "—"} • Room ${p.bio["Room"] || "—"}`
-          ),
+          U.h("div", { class: "meta" }, `${p.bio["Patient Code"] || "—"} • Room ${p.bio["Room"] || "—"}`),
         ]),
         rightMeta,
       ]);
+
       if (p.done) li.classList.add("done");
       if (p.id === curId) li.classList.add("active");
       el.patientList.appendChild(li);
@@ -389,87 +396,87 @@
 
   function renderProgress() {
     const pct = S.progress();
-    el.progressPct.textContent = `${pct}%`;
-    el.progressFill.style.width = `${pct}%`;
+    if (el.progressPct) el.progressPct.textContent = `${pct}%`;
+    if (el.progressFill) el.progressFill.style.width = `${pct}%`;
   }
 
   function renderCurrentPatient() {
     const p = S.getCurrentPatient();
-
     const has = !!p;
-    el.editPatientBtn.disabled = !has;
-    el.markDoneBtn.disabled = !has;
-    el.reminderBtn.disabled = !has;
-    el.toggleCTCAE.disabled = !has;
+
+    if (el.editPatientBtn) el.editPatientBtn.disabled = !has;
+    if (el.markDoneBtn) el.markDoneBtn.disabled = !has;
+    if (el.reminderBtn) el.reminderBtn.disabled = !has;
+    if (el.toggleCTCAE) el.toggleCTCAE.disabled = !has;
 
     if (!p) {
-      el.currentPatientName.textContent = "No patient selected";
-      // wipe cards
-      [
-        el.bioCode, el.bioName, el.bioAge, el.bioRoom, el.bioProvider, el.bioCOA,
-        el.bioDiet, el.bioIso, el.bioComments,
-      ].forEach((n) => (n.textContent = "—"));
-      el.hpiCause.textContent = "—";
-      el.hpiPrevTx.textContent = "—";
-      el.hpiCurrTx.textContent = "—";
-      el.hpiInit.textContent = "—";
-      el.esasSummary.innerHTML = "";
-      el.ctcaeSummary.innerHTML =
-        '<p class="muted">CTCAE is currently disabled. Toggle "Enable" to record grades.</p>';
-      el.ctcaeSummary.classList.add("is-disabled");
-      el.toggleCTCAE.checked = false;
-      el.labsGroup1.innerHTML = "";
-      el.labsGroup2.innerHTML = "";
-      el.labsGroup3.innerHTML = "";
-      el.latestNotes.textContent = "No notes yet.";
+      if (el.currentPatientName) el.currentPatientName.textContent = "No patient selected";
+      [ el.bioCode, el.bioName, el.bioAge, el.bioRoom, el.bioProvider, el.bioCOA, el.bioDiet, el.bioIso, el.bioComments ]
+        .forEach((n) => n && (n.textContent = "—"));
+
+      if (el.hpiCause) el.hpiCause.textContent = "—";
+      if (el.hpiPrevTx) el.hpiPrevTx.textContent = "—";
+      if (el.hpiCurrTx) el.hpiCurrTx.textContent = "—";
+      if (el.hpiInit) el.hpiInit.textContent = "—";
+
+      if (el.esasSummary) el.esasSummary.innerHTML = "";
+      if (el.ctcaeSummary) {
+        el.ctcaeSummary.innerHTML = 'CTCAE is currently disabled. Toggle "Enable" to record grades.';
+        el.ctcaeSummary.classList.add("is-disabled");
+      }
+      if (el.toggleCTCAE) el.toggleCTCAE.checked = false;
+
+      if (el.labsGroup1) el.labsGroup1.innerHTML = "";
+      if (el.labsGroup2) el.labsGroup2.innerHTML = "";
+      if (el.labsGroup3) el.labsGroup3.innerHTML = "";
+
+      if (el.latestNotes) el.latestNotes.textContent = "No notes yet.";
       return;
     }
 
-    el.currentPatientName.textContent = p.bio["Patient Name"] || "Unnamed";
+    if (el.currentPatientName) el.currentPatientName.textContent = p.bio["Patient Name"] || "Unnamed";
 
     // Bio
-    el.bioCode.textContent = p.bio["Patient Code"] || "—";
-    el.bioName.textContent = p.bio["Patient Name"] || "—";
-    el.bioAge.textContent = p.bio["Patient Age"] || "—";
-    el.bioRoom.textContent = p.bio["Room"] || "—";
-    el.bioProvider.textContent = p.bio["Admitting Provider"] || "—";
-    el.bioCOA.textContent = p.bio["Cause Of Admission"] || "—";
-    el.bioDiet.textContent = p.bio["Diet"] || "—";
-    el.bioIso.textContent = p.bio["Isolation"] || "—";
-    el.bioComments.textContent = p.bio["Comments"] || "—";
+    if (el.bioCode) el.bioCode.textContent = p.bio["Patient Code"] || "—";
+    if (el.bioName) el.bioName.textContent = p.bio["Patient Name"] || "—";
+    if (el.bioAge) el.bioAge.textContent = p.bio["Patient Age"] || "—";
+    if (el.bioRoom) el.bioRoom.textContent = p.bio["Room"] || "—";
+    if (el.bioProvider) el.bioProvider.textContent = p.bio["Admitting Provider"] || "—";
+    if (el.bioCOA) el.bioCOA.textContent = p.bio["Cause Of Admission"] || "—";
+    if (el.bioDiet) el.bioDiet.textContent = p.bio["Diet"] || "—";
+    if (el.bioIso) el.bioIso.textContent = p.bio["Isolation"] || "—";
+    if (el.bioComments) el.bioComments.textContent = p.bio["Comments"] || "—";
 
     // HPI
-    el.hpiCause.textContent = p.hpi.cause || "—";
-    el.hpiPrevTx.textContent = p.hpi.previous || "—";
-    el.hpiCurrTx.textContent = p.hpi.current || "—";
-    el.hpiInit.textContent = p.hpi.initial || "—";
+    if (el.hpiCause) el.hpiCause.textContent = p.hpi.cause || "—";
+    if (el.hpiPrevTx) el.hpiPrevTx.textContent = p.hpi.previous || "—";
+    if (el.hpiCurrTx) el.hpiCurrTx.textContent = p.hpi.current || "—";
+    if (el.hpiInit) el.hpiInit.textContent = p.hpi.initial || "—";
 
-    // ESAS (chips)
+    // ESAS & CTCAE
     renderESASSummary(p);
-
-    // CTCAE
     renderCTCAESummary(p);
 
     // Labs
     renderLabs(p);
 
-    // Notes (include assessment & meds compactly)
-    el.latestNotes.innerHTML = "";
-    const blocks = [];
-    if (p.latestNotes) blocks.push(sectionBlock("Notes", p.latestNotes));
-    if (p.patientAssessment) blocks.push(sectionBlock("Patient Assessment", p.patientAssessment));
-    if (p.medicationList) blocks.push(sectionBlock("Medication List", p.medicationList));
-    if (!blocks.length) {
-      el.latestNotes.textContent = "No notes yet.";
-    } else {
-      blocks.forEach((b) => el.latestNotes.appendChild(b));
+    // Notes (compact) — تشمل Assessment & Meds
+    if (el.latestNotes) {
+      el.latestNotes.innerHTML = "";
+      const blocks = [];
+      if (p.latestNotes) blocks.push(sectionBlock("Notes", p.latestNotes));
+      if (p.patientAssessment) blocks.push(sectionBlock("Patient Assessment", p.patientAssessment));
+      if (p.medicationList) blocks.push(sectionBlock("Medication List", p.medicationList));
+      if (!blocks.length) el.latestNotes.textContent = "No notes yet.";
+      else blocks.forEach((b) => el.latestNotes.appendChild(b));
     }
 
-    // Sync CTCAE toggle to patient
-    el.toggleCTCAE.checked = !!p.ctcae.enabled;
+    // CTCAE toggle
+    if (el.toggleCTCAE) el.toggleCTCAE.checked = !!p.ctcae.enabled;
   }
 
   function renderESASSummary(p) {
+    if (!el.esasSummary) return;
     el.esasSummary.innerHTML = "";
     C.ESAS_FIELDS.forEach((k) => {
       const val = p.esas[k];
@@ -480,46 +487,43 @@
   }
 
   function renderCTCAESummary(p) {
+    if (!el.ctcaeSummary) return;
     el.ctcaeSummary.innerHTML = "";
     const enabled = !!p.ctcae.enabled;
     el.ctcaeSummary.classList.toggle("is-disabled", !enabled);
     if (!enabled) {
       el.ctcaeSummary.innerHTML =
-        '<p class="muted">CTCAE is currently disabled. Toggle "Enable" to record grades.</p>';
+        'CTCAE is currently disabled. Toggle "Enable" to record grades.';
       return;
     }
     const list = U.h("div", { class: "keyvals compact" });
     C.CTCAE_ITEMS.forEach(({ key, label }) => {
       const g = p.ctcae.items[key]?.grade;
       const v = g == null ? "—" : `G${g}`;
-      list.appendChild(
-        U.h("div", { class: "kv" }, [U.h("span", {}, label), U.h("strong", {}, v)])
-      );
+      list.appendChild(U.h("div", { class: "kv" }, [U.h("span", {}, label), U.h("strong", {}, v)]));
     });
     el.ctcaeSummary.appendChild(list);
   }
 
   function renderLabs(p) {
     const makeKV = (name, value) => {
-      const ref = C.REF_RANGES[name] ? { "data-ref": `Ref: ${C.REF_RANGES[name]}` } : {};
-      return U.h("div", { class: "kv" }, [
-        U.h("span", ref, name),
-        U.h("strong", {}, value),
-      ]);
+      const ref = C.REF_RANGES?.[name] ? { "data-ref": `Ref: ${C.REF_RANGES[name]}` } : {};
+      return U.h("div", { class: "kv" }, [U.h("span", ref, name), U.h("strong", {}, value)]);
     };
     const v = (k) => S.getLabValue(p, k);
 
-    // Group 1
-    el.labsGroup1.innerHTML = "";
-    C.LAB_GROUPS.group1.forEach((k) => el.labsGroup1.appendChild(makeKV(k, v(k))));
-
-    // Group 2
-    el.labsGroup2.innerHTML = "";
-    C.LAB_GROUPS.group2.forEach((k) => el.labsGroup2.appendChild(makeKV(k, v(k))));
-
-    // Group 3
-    el.labsGroup3.innerHTML = "";
-    C.LAB_GROUPS.group3.forEach((k) => el.labsGroup3.appendChild(makeKV(k, v(k))));
+    if (el.labsGroup1) {
+      el.labsGroup1.innerHTML = "";
+      C.LAB_GROUPS.group1.forEach((k) => el.labsGroup1.appendChild(makeKV(k, v(k))));
+    }
+    if (el.labsGroup2) {
+      el.labsGroup2.innerHTML = "";
+      C.LAB_GROUPS.group2.forEach((k) => el.labsGroup2.appendChild(makeKV(k, v(k))));
+    }
+    if (el.labsGroup3) {
+      el.labsGroup3.innerHTML = "";
+      C.LAB_GROUPS.group3.forEach((k) => el.labsGroup3.appendChild(makeKV(k, v(k))));
+    }
   }
 
   function sectionBlock(title, txt) {
@@ -531,6 +535,7 @@
 
   /* ---------- Helpers ---------- */
   function resetQuickAddForm() {
+    if (!el.qpCode) return;
     el.qpCode.value = "";
     el.qpName.value = "";
     el.qpAge.value = "";
@@ -544,23 +549,16 @@
 
   function applySettings(st) {
     U.applyTheme(st || S.state.settings);
-    // auto theme: follow prefers-color-scheme unless user forces
+    // Follow system light/dark if auto (إن كان الستايل يدعمه)
     if ((st || S.state.settings).theme === "auto") {
       const mql = window.matchMedia("(prefers-color-scheme: light)");
       document.documentElement.classList.toggle("theme-light", mql.matches);
     }
   }
 
-  // Expose minimal API (if other modules need to trigger refresh)
-  PR.ui = {
-    renderAll,
-    renderCurrentPatient,
-    renderPatientList,
-    renderProgress,
-  };
+  // Expose minimal UI API
+  PR.ui = { renderAll, renderCurrentPatient, renderPatientList, renderProgress };
 
   // Boot
-  document.readyState === "loading"
-    ? document.addEventListener("DOMContentLoaded", init)
-    : init();
+  document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", init) : init();
 })();
