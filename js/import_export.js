@@ -1,7 +1,8 @@
 /* ------------------------------------------------------
  Palliative Rounds — import_export.js
  CSV import/export + PDF handoff + FULL JSON import/export (auto-injected UI)
- Import supports MERGE (OK) or REPLACE (Cancel)
+ CSV import asks for a Section for the newly imported rows
+ JSON import supports MERGE (OK) or REPLACE (Cancel)
 -------------------------------------------------------*/
 (function () {
   const U = PR.utils;
@@ -84,6 +85,21 @@
       null
     );
   }
+  function cryptoSafeHash(obj) {
+    // light, stable-ish hash if no key found
+    try {
+      const str = JSON.stringify(obj);
+      let h = 0, i, chr;
+      for (i = 0; i < str.length; i++) {
+        chr = str.charCodeAt(i);
+        h = (h << 5) - h + chr;
+        h |= 0;
+      }
+      return "h" + Math.abs(h);
+    } catch {
+      return "h" + Math.floor(Math.random() * 1e9);
+    }
+  }
   function arrayDedupeBy(arr, keyFn) {
     const map = new Map();
     for (const x of arr || []) {
@@ -91,7 +107,6 @@
         const k = keyFn(x);
         if (!map.has(k)) map.set(k, x);
         else {
-          // keep the newer one if both exist and have updatedAt/date
           const prev = map.get(k);
           const ua = x?.updatedAt || x?.date || x?.timestamp;
           const ub = prev?.updatedAt || prev?.date || prev?.timestamp;
@@ -102,7 +117,6 @@
     return Array.from(map.values());
   }
   function mergeArraysByDate(a = [], b = []) {
-    // generic merge for entries that have a date/timestamp/id
     return arrayDedupeBy([...(a || []), ...(b || [])], (x) =>
       x?.id || x?.code || x?.name || x?.date || JSON.stringify(x)
     );
@@ -120,6 +134,22 @@
       U.toast("Please select a .csv file.", "warn");
       return resetFile(input);
     }
+
+    // Capture existing keys BEFORE import (to detect newly added patients)
+    const preKeys = new Set((S.state.patients || []).map((p) => getPatientKey(p) || cryptoSafeHash(p)));
+
+    // Ask user which Section to assign the NEWLY imported rows to
+    const defaultSection =
+      (S.state?.ui?.currentSection) ||
+      (S.state?.settings?.defaultSection) ||
+      "";
+    const chosenSection = window.prompt(
+      "Import CSV: which Section should the NEW patients be assigned to?\n" +
+      "- Leave blank to keep whatever section the app assigns.\n" +
+      "- Example: A, B, Oncology, ICU, ...",
+      defaultSection
+    );
+    // NOTE: if user cancels prompt (returns null), we still proceed with import but without forcing a section.
 
     Papa.parse(file, {
       header: true,
@@ -153,13 +183,39 @@
             U.toast("CSV has no usable rows.", "warn");
             return resetFile(input);
           }
-          const count = S.importRows(rows);
-          U.toast(`Imported ${count} patient(s).`, "success");
+
+          const importedCount = S.importRows(rows);
+
+          // Assign SECTION to only the newly added patients
+          const sectionToApply = (chosenSection || "").trim();
+          if (sectionToApply) {
+            const nowISO = new Date().toISOString();
+            let applied = 0;
+            for (const p of S.state.patients || []) {
+              const key = getPatientKey(p) || cryptoSafeHash(p);
+              if (!preKeys.has(key)) {
+                p.section = sectionToApply;
+                // update freshness
+                p.updatedAt = newer(nowISO, p.updatedAt) ? nowISO : p.updatedAt;
+                applied++;
+              }
+            }
+            if (applied > 0) {
+              // notify UI listeners
+              S.emit("patients:changed", S.state.patients);
+            }
+          }
+
+          // Done
+          U.toast(`Imported ${importedCount} patient(s).${(chosenSection && chosenSection.trim()) ? ` Section: ${chosenSection.trim()}` : ""}`, "success");
           resetFile(input);
         } catch (err) {
           console.error(err);
           U.toast("Failed to import CSV.", "error");
           resetFile(input);
+        } finally {
+          // Persist after any changes
+          try { S.persist(); } catch {}
         }
       },
       error: (err) => {
@@ -361,7 +417,6 @@
         byKey.set(k, newP);
         continue;
       }
-      // If incoming patient is newer overall, shallow-override; else keep old, but merge lists
       const takeIncoming = newer(newP.updatedAt, oldP.updatedAt);
 
       const merged = takeIncoming ? { ...oldP, ...newP } : { ...newP, ...oldP };
@@ -375,12 +430,10 @@
       merged.meds = mergeArraysByDate(oldP.meds, newP.meds);
       merged.notes = mergeArraysByDate(oldP.notes, newP.notes);
 
-      // For nested objects (bio, hpi, vitals, etc.) prefer newer one field-by-field if timestamps exist
       merged.bio = mergeObjectByFreshness(oldP.bio, newP.bio);
       merged.hpi = mergeObjectByFreshness(oldP.hpi, newP.hpi);
       merged.vitals = mergeObjectByFreshness(oldP.vitals, newP.vitals);
 
-      // section/current flags: keep existing unless incoming is newer
       if (takeIncoming) {
         merged.section = newP.section ?? oldP.section;
         merged.current = newP.current ?? oldP.current;
@@ -389,7 +442,6 @@
         merged.current = oldP.current ?? newP.current;
       }
 
-      // updatedAt: keep the newer timestamp
       merged.updatedAt = newer(newP.updatedAt, oldP.updatedAt) ? newP.updatedAt : oldP.updatedAt;
 
       byKey.set(k, merged);
@@ -414,29 +466,11 @@
     const out = { ...a };
     for (const k of Object.keys(b)) {
       const va = a[k], vb = b[k];
-      // if both have sub-updatedAt, use it; else prefer non-empty incoming
       const ua = (va && va.updatedAt) || (a.updatedAt);
       const ub = (vb && vb.updatedAt) || (b.updatedAt);
       out[k] = newer(ub, ua) ? vb : (va ?? vb);
     }
-    // overall updatedAt
     out.updatedAt = newer(b.updatedAt, a.updatedAt) ? b.updatedAt : a.updatedAt;
     return out;
-  }
-
-  function cryptoSafeHash(obj) {
-    // super-light fallback hash if no key found; not cryptographically strong, but stable-ish
-    try {
-      const str = JSON.stringify(obj);
-      let h = 0, i, chr;
-      for (i = 0; i < str.length; i++) {
-        chr = str.charCodeAt(i);
-        h = (h << 5) - h + chr;
-        h |= 0;
-      }
-      return "h" + Math.abs(h);
-    } catch {
-      return "h" + Math.floor(Math.random() * 1e9);
-    }
   }
 })();
