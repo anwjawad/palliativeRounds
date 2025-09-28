@@ -1,8 +1,11 @@
 /**
  * app_autosync.js
- * Auto Save/Sync إلى GAS مع تحكّم زمني:
- * - لا ندفع إلى السيرفر إلا السجلات التي updatedAt (محليًا) أحدث من آخر مزامنة.
- * - Reminders: نستخدم createdAt كسجل زمني إن وُجد، وإلا ندفع عندما لا يوجد في اللقطة السابقة.
+ * Auto Save/Sync مع GAS + دعم Force/Seed
+ *
+ * الجديد:
+ *  - لا نأخذ snapshot ابتدائيًا. نأخذ اللقطة فقط بعد مزامنة ناجحة.
+ *  - runSync(options) يدعم { forceAll: true } لدفع كل البيانات بغض النظر عن snapshot.
+ *  - seedAll(): يفرض push كامل (مفيد عندما تكون Google Sheet فارغة).
  */
 
 (function () {
@@ -17,21 +20,28 @@
   let debounceTimer = null;
   let syncing = false;
 
+  // لقطة آخر مزامنة "ناجحة" فقط
   let lastSynced = loadSnapshot() || { patients: [], reminders: [], settings: {}, ui: {} };
 
   const AutoSync = {
     init() {
       ensureState();
       wrapPersist();
-      document.addEventListener("DOMContentLoaded", () => {
-        // بعد bootstrap (app_gas) خذ لقطة
-        setTimeout(captureSnapshotFromState, 2000);
-      });
       console.log("[AutoSync] initialized");
     },
     scheduleSync,
-    runSync
+    runSync,
+    seedAll
   };
+
+  // يفرض مزامنة كاملة (للاستخدام عندما تكون الشيت فارغة)
+  async function seedAll() {
+    // نظّف اللقطة حتى نعتبر كل المحلي غير متزامن
+    lastSynced = { patients: [], reminders: [], settings: {}, ui: {} };
+    try { localStorage.removeItem(STORAGE_SNAPSHOT_KEY); } catch {}
+    // ادفع كل شيء الآن
+    await runSync({ forceAll: true });
+  }
 
   function wrapPersist() {
     const S = PR.state;
@@ -63,16 +73,21 @@
 
   function scheduleSync() {
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(runSync, AUTOSYNC_DEBOUNCE_MS);
+    debounceTimer = setTimeout(() => runSync(), AUTOSYNC_DEBOUNCE_MS);
   }
 
-  async function runSync() {
-    if (syncing) return scheduleSync();
-    if (queue.size === 0) return;
+  async function runSync(options = {}) {
+    if (syncing) {
+      // لو هناك مزامنة قيد التنفيذ، أعد الجدولة
+      return scheduleSync();
+    }
+    if (!options.forceAll && queue.size === 0) return;
 
     syncing = true;
-    const keys = Array.from(queue);
+    const keys = options.forceAll ? [K.SETTINGS, K.UI, K.PATIENTS, K.REMINDERS] : Array.from(queue);
     queue.clear();
+
+    const force = !!options.forceAll;
 
     try {
       const st = getState();
@@ -80,15 +95,18 @@
       if (keys.includes(K.SETTINGS)) await SettingsAPI.save(st.settings || {});
       if (keys.includes(K.UI)) await UIAPI.save(st.ui || {});
 
-      if (keys.includes(K.PATIENTS)) await syncPatientsSelective(st.patients || []);
-      if (keys.includes(K.REMINDERS)) await syncRemindersSelective(st.reminders || []);
+      if (keys.includes(K.PATIENTS)) await syncPatientsSelective(st.patients || [], { force });
+      if (keys.includes(K.REMINDERS)) await syncRemindersSelective(st.reminders || [], { force });
 
+      // ✅ خذ لقطة فقط بعد نجاح المزامنة
       captureSnapshotFromState();
+
       console.log("[AutoSync] synced:", keys.join(", "));
     } catch (err) {
       console.error("[AutoSync] sync error:", err);
+      // اسمح للمؤشرات/البادج أن ترى الخطأ
       setTimeout(scheduleSync, AUTOSYNC_DEBOUNCE_MS * 2);
-      throw err; // ليشاهده البادج أيضًا
+      throw err;
     } finally {
       syncing = false;
     }
@@ -101,15 +119,14 @@
     try { return new Date(String(s).replace(" ", "T")).getTime() || 0; } catch { return 0; }
   }
 
-  async function syncPatientsSelective(current) {
+  async function syncPatientsSelective(current, { force }) {
     const curById = indexById(current);
     const lastById = indexById(lastSynced.patients || []);
 
-    // upsert فقط عندما المحلي أحدث من آخر لقطة متزامنة أو غير موجود فيها
     for (const id of Object.keys(curById)) {
       const cur = curById[id];
       const last = lastById[id];
-      if (!last) {
+      if (force || !last) {
         await PatientsAPI.save(cur);
       } else {
         const tCur = tsToMs(cur.updatedAt);
@@ -120,8 +137,7 @@
       }
     }
 
-    // حذف (اختياري)
-    if (ENABLE_DELETE_DETECTION) {
+    if (ENABLE_DELETE_DETECTION && !force) {
       for (const id of Object.keys(lastById)) {
         if (!curById[id]) {
           try { await PatientsAPI.remove(id); } catch {}
@@ -130,17 +146,16 @@
     }
   }
 
-  async function syncRemindersSelective(current) {
+  async function syncRemindersSelective(current, { force }) {
     const curById = indexById(current);
     const lastById = indexById(lastSynced.reminders || []);
 
     for (const id of Object.keys(curById)) {
       const cur = curById[id];
       const last = lastById[id];
-      if (!last) {
+      if (force || !last) {
         await RemindersAPI.save(cur);
       } else {
-        // لا يوجد updatedAt في السكيمة؛ استخدم createdAt (إن وجد) وإلا لا ترسل إلا إذا تغيّر الجسم
         const tCur = tsToMs(cur.createdAt);
         const tLast = tsToMs(last.createdAt);
         if (tCur > tLast || JSON.stringify(cur) !== JSON.stringify(last)) {
@@ -149,7 +164,7 @@
       }
     }
 
-    if (ENABLE_DELETE_DETECTION) {
+    if (ENABLE_DELETE_DETECTION && !force) {
       for (const id of Object.keys(lastById)) {
         if (!curById[id]) {
           try { await RemindersAPI.remove(id); } catch {}
@@ -200,12 +215,9 @@
   }
 
   function ensureState() {
-    getState(); // يضمن البنية
+    getState();
   }
 
   // كشف عام
-  window.PR_AUTOSYNC = { scheduleSync, runSync };
-
-  // تشغيل
-  AutoSync.init();
+  window.PR_AUTOSYNC = { scheduleSync, runSync, seedAll };
 })();
