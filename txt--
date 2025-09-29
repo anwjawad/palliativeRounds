@@ -1,0 +1,5 @@
+  <script src="js/sheets_api.js" defer></script>
+  <script src="js/app_mapping.js"></script>
+ <script src="js/app_gas.js" defer></script>
+<script src="js/app_autosync.js"></script>
+<script src="js/app_sync_indicator.js"></script>
